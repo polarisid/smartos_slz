@@ -2,6 +2,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -11,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { db } from "@/lib/firebase";
 import { type Route, type RouteStop, type RoutePart, type ServiceOrder } from "@/lib/data";
 import { collection, doc, getDocs, query, setDoc, Timestamp, orderBy, getDoc } from "firebase/firestore";
-import { ChevronDown, PackageSearch, Save, Search, FileDown, CheckCircle, ScanLine, FileBarChart2 } from "lucide-react";
+import { ChevronDown, PackageSearch, Save, Search, FileDown, CheckCircle, ScanLine, FileBarChart2, Smartphone, Copy } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import jsPDF from 'jspdf';
@@ -790,7 +791,7 @@ export default function PartSeparationPage() {
         <>
             <div className="flex flex-col gap-6 p-4 sm:p-6">
                 <div className="flex items-center justify-between">
-                    <h1 className="text-2xl font-bold">Separação de Peças</h1>
+                    <h1 className="text-2xl font-bold">Conferência de Peças</h1>
                 </div>
 
                 <Card>
@@ -818,11 +819,14 @@ export default function PartSeparationPage() {
                     <p className="text-center text-muted-foreground py-10">Carregando rotas...</p>
                 ) : (
                     <Tabs defaultValue="active">
-                        <TabsList className="grid w-full grid-cols-3">
-                            <TabsTrigger value="active">Separação Ativa</TabsTrigger>
-                            <TabsTrigger value="history">Histórico de Rotas</TabsTrigger>
+                        <TabsList className="grid w-full grid-cols-4">
+                            <TabsTrigger value="active">Rastreio de Peças (Ativas)</TabsTrigger>
+                            <TabsTrigger value="history">Rastreio de Peças (Concluídas)</TabsTrigger>
                             <TabsTrigger value="summary">
-                                <FileBarChart2 className="mr-2 h-4 w-4" /> Resumo de Peças
+                                <FileBarChart2 className="mr-2 h-4 w-4" /> Conferência de Retorno
+                            </TabsTrigger>
+                             <TabsTrigger value="mobile">
+                                <Smartphone className="mr-2 h-4 w-4" /> Conferência Mobile
                             </TabsTrigger>
                         </TabsList>
                         <TabsContent value="active" className="mt-6">
@@ -855,6 +859,26 @@ export default function PartSeparationPage() {
                            <MonthlyPartsSummary serviceOrders={serviceOrders} routes={allRoutes} />
                            <PartsSummary routes={filteredRoutes} serviceOrders={serviceOrders} />
                         </TabsContent>
+                        <TabsContent value="mobile" className="mt-6">
+                            <Card>
+                                <CardHeader>
+                                    <CardTitle className="flex items-center gap-2">
+                                        <Smartphone className="h-5 w-5" />
+                                        Acessar Conferência Mobile
+                                    </CardTitle>
+                                    <CardDescription>
+                                        Use o link abaixo para abrir a interface de conferência otimizada para dispositivos móveis em uma nova aba.
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                    <Button asChild>
+                                        <Link href="/mobile-conference" target="_blank" rel="noopener noreferrer">
+                                            Abrir Conferência Mobile
+                                        </Link>
+                                    </Button>
+                                </CardContent>
+                            </Card>
+                        </TabsContent>
                     </Tabs>
                 )}
             </div>
@@ -867,6 +891,3 @@ export default function PartSeparationPage() {
         </>
     );
 }
-
-    
-
