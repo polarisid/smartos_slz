@@ -1,4 +1,5 @@
 
+
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
@@ -460,8 +461,9 @@ function PartsSummary({ routes, serviceOrders }: { routes: Route[], serviceOrder
                 stop.parts.forEach(part => {
                     const osRecord = serviceOrders.find(os => 
                         os.serviceOrderNumber === stop.serviceOrder && 
-                        route.createdAt && 
-                        isAfter(os.date, route.createdAt)
+                        os.serviceOrderNumber === stop.serviceOrder && 
+                        createdAtDate && 
+                        isAfter(os.date, createdAtDate)
                     );
 
                     let status = "Nova"; // Default status
@@ -516,7 +518,9 @@ function PartsSummary({ routes, serviceOrders }: { routes: Route[], serviceOrder
                         <div className="flex flex-wrap items-start justify-between gap-4">
                             <div>
                                 <CardTitle>{route.name}</CardTitle>
-                                <CardDescription>Resumo de utilização de peças para esta rota.</CardDescription>
+                                <CardDescription>
+                                    {`Criação: ${route.createdAt instanceof Date ? route.createdAt.toLocaleDateString('pt-BR') : 'N/A'} | Retorno: ${route.arrivalDate instanceof Date ? route.arrivalDate.toLocaleDateString('pt-BR') : 'Pendente'}`}
+                                </CardDescription>
                             </div>
                             <div className="flex flex-col items-end gap-2">
                                 <Badge variant={utilizationRate > 80 ? "default" : "destructive"} className="text-base py-1 px-3">
@@ -736,7 +740,7 @@ export default function PartSeparationPage() {
         const createdAtDate = route.createdAt instanceof Date ? route.createdAt : (route.createdAt as unknown as Timestamp).toDate();
         doc.text(`Data de Criação: ${createdAtDate.toLocaleDateString('pt-BR')}`, 14, 26);
 
-        type Row = (string | number)[];
+        type Row = any[];
         const tableBody: Row[] = [];
         
         route.stops.forEach(stop => {
@@ -891,3 +895,6 @@ export default function PartSeparationPage() {
         </>
     );
 }
+
+
+    
