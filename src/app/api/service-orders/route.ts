@@ -3,13 +3,16 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, Timestamp, query, where } from 'firebase/firestore';
 import { type ServiceOrder, type Route, type Technician } from '@/lib/data';
+import { subMonths } from 'date-fns';
 
 export async function GET() {
   try {
-    // Fetch all necessary data from Firestore in parallel
+    const sixMonthsAgo = subMonths(new Date(), 6);
+    // Fetch only recent service orders (last 6 months) + active routes + technicians in parallel
     const activeRoutesQuery = query(collection(db, "routes"), where("isActive", "==", true));
+    const ordersQuery = query(collection(db, "serviceOrders"), where("date", ">=", sixMonthsAgo));
     const [ordersSnapshot, activeRoutesSnapshot, techniciansSnapshot] = await Promise.all([
-      getDocs(collection(db, "serviceOrders")),
+      getDocs(ordersQuery),
       getDocs(activeRoutesQuery),
       getDocs(collection(db, "technicians"))
     ]);
@@ -38,20 +41,33 @@ export async function GET() {
                 if (serviceOrder) {
                     const technicianName = techniciansMap.get(serviceOrder.technicianId) || 'N/A';
                     const date = (serviceOrder.date as unknown as Timestamp).toDate().toISOString();
+                    
+                    let status = 'Vai ser feita';
+                    if (serviceOrder.isFinalized) {
+                        status = 'Finalizada';
+                    } else if (serviceOrder.pendingReason && serviceOrder.pendingReason.trim() !== '') {
+                        status = 'Pendente';
+                    }
+
                     return {
                         ...serviceOrder,
                         date,
                         technicianName,
+                        status,
                     };
                 }
                 return null;
             })
-            .filter((os): os is ServiceOrder & { date: string; technicianName: string } => os !== null);
+            .filter((os): os is ServiceOrder & { date: string; technicianName: string; status: string } => os !== null);
 
         // Convert route's Timestamps to serializable format
         const createdAt = (route.createdAt as unknown as Timestamp)?.toDate().toISOString();
         const departureDate = (route.departureDate as unknown as Timestamp)?.toDate().toISOString();
         const arrivalDate = (route.arrivalDate as unknown as Timestamp)?.toDate().toISOString();
+
+        const finalizadas = serviceOrdersInRoute.filter(os => os.status === 'Finalizada');
+        const pendentes = serviceOrdersInRoute.filter(os => os.status === 'Pendente');
+        const a_fazer = serviceOrdersInRoute.filter(os => os.status === 'Vai ser feita');
 
         return {
             ...route,
@@ -59,6 +75,9 @@ export async function GET() {
             departureDate,
             arrivalDate,
             serviceOrders: serviceOrdersInRoute,
+            finalizadas,
+            pendentes,
+            a_fazer,
         };
     });
 
