@@ -1,6 +1,5 @@
 
 
-import { type Timestamp } from "firebase/firestore";
 
 export type AppUser = {
   uid: string;
@@ -69,7 +68,7 @@ export type CounterBudget = {
   id: string;
   technicianId: string;
   technicianName: string;
-  date: Timestamp | Date;
+  date: Date;
   
   // Customer info
   customerName: string;
@@ -196,10 +195,11 @@ export type Route = {
     id: string;
     name: string;
     stops: RouteStop[];
-    createdAt: Timestamp | Date;
+    createdAt: Date;
     isActive: boolean;
-    departureDate?: Timestamp | Date;
-    arrivalDate?: Timestamp | Date;
+    isCanceled?: boolean;
+    departureDate?: Date;
+    arrivalDate?: Date;
     routeType?: 'capital' | 'interior';
     licensePlate?: string;
     technicianId?: string;
@@ -283,4 +283,38 @@ export const repairCodes = {
     { code: 'R03', description: 'Troca da placa de potência' },
     { code: 'R04', description: 'Troca da bomba de drenagem' },
   ]
+};
+
+export type TriageChatMessage = {
+  id: string;
+  role: 'user' | 'model';
+  content: string;
+  imageUrl?: string;
+  createdAt: Date;
+};
+
+export type TriageSession = {
+  id: string; // The session ID (can be used in public URL)
+  serviceOrderNumber: string;
+  productModel: string;
+  productLine?: string;
+  status: 'em_andamento' | 'concluido';
+  createdAt: Date;
+  updatedAt: Date;
+  messages: TriageChatMessage[];
+  finalDiagnosis?: string;
+  suggestedParts?: string[];
+  symptomsReported?: string[];
+  isCorrected?: boolean;
+  correctedDiagnosis?: string;
+  correctedParts?: string[];
+};
+
+export type KnowledgeDocument = {
+  id: string;
+  title: string;
+  content: string;
+  productLine?: string;
+  productFamily: string; // e.g. "TV", "Refrigerador", or specific model
+  createdAt: Date;
 };

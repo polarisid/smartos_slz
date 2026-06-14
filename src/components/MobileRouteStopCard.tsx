@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Timestamp } from "firebase/firestore";
 import { isAfter } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { Card } from "@/components/ui/card";
@@ -26,19 +25,16 @@ export function MobileRouteStopCard({
     stop: RouteStop, 
     index: number, 
     serviceOrders: ServiceOrder[], 
-    routeCreatedAt: Date | Timestamp,
+    routeCreatedAt: Date,
     visitTemplate: string,
     blockedOrders: Record<string, string>,
     onBlock: (serviceOrder: string, reason: string) => void,
     onUnblock: (serviceOrder: string) => void,
 }) {
     const { toast } = useToast();
-    const createdAtAsDate = routeCreatedAt instanceof Timestamp ? routeCreatedAt.toDate() : routeCreatedAt;
-    const relatedOsList = serviceOrders.filter(os => 
-        os.serviceOrderNumber === stop.serviceOrder && 
-        isAfter(os.date, createdAtAsDate)
-    );
-    const relatedOs = relatedOsList.length > 0 ? relatedOsList[relatedOsList.length - 1] : null;
+    const relatedOsList = serviceOrders.filter(os => os.serviceOrderNumber === stop.serviceOrder);
+    relatedOsList.sort((a, b) => b.date.getTime() - a.date.getTime());
+    const relatedOs = relatedOsList.length > 0 ? relatedOsList[0] : null;
 
     const isPending = relatedOs && (relatedOs.isFinalized === false);
     const isCompleted = relatedOs && (relatedOs.isFinalized !== false);
@@ -151,10 +147,28 @@ export function MobileRouteStopCard({
                                 <p className="text-xs font-medium line-clamp-1">{stop.consumerName || "N/A"}</p>
                             </div>
                             <div>
-                                <p className="font-bold text-[10px] uppercase text-muted-foreground mb-0.5">Status Comment:</p>
+                                <p className="font-bold text-[10px] uppercase text-muted-foreground mb-0.5">Status ASC:</p>
                                 <p className="text-[11px] font-medium leading-tight line-clamp-2">{stop.statusComment || "N/A"}</p>
                             </div>
                         </div>
+                        {isPending && (
+                            <div className="rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-2 space-y-1">
+                                <p className="font-bold text-[10px] uppercase text-red-700 dark:text-red-400 mb-1">Registro do Técnico (Pendência):</p>
+                                {relatedOs?.pendingReason && (
+                                    <p className="text-xs text-red-800 dark:text-red-300">
+                                        <span className="font-bold">Motivo: </span>{relatedOs.pendingReason}
+                                    </p>
+                                )}
+                                {relatedOs?.observations && (
+                                    <p className="text-xs text-red-800 dark:text-red-300">
+                                        <span className="font-bold">Observações: </span>{relatedOs.observations}
+                                    </p>
+                                )}
+                                {!relatedOs?.pendingReason && !relatedOs?.observations && (
+                                    <p className="text-xs text-muted-foreground">Nenhuma observação registrada pelo técnico.</p>
+                                )}
+                            </div>
+                        )}
                         <Button size="sm" variant="default" className="w-full font-bold h-9 bg-primary" onClick={handleCopyVisitText}>
                             <MessageSquare className="mr-2 h-4 w-4" />
                             Copiar Anúncio de Visita

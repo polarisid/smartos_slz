@@ -11,10 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { subDays } from "date-fns";
-import { db } from "@/lib/firebase";
-import { type Route, type RouteStop, type RoutePart, type ServiceOrder } from "@/lib/data";
-import { collection, doc, getDocs, query, setDoc, Timestamp, orderBy, getDoc, where } from "firebase/firestore";
-import { Printer, Smartphone, Table as TableIcon, Activity, CheckCircle2, AlertCircle, FileBarChart2, Search, ChevronDown, PackageSearch, Save, FileDown, CheckCircle, ScanLine, Copy } from "lucide-react";
+import { routeService } from "@/services/supabase/routeService";
+import { type Route, type RouteStop, type RoutePart, type Technician, type ServiceOrder } from "@/lib/data";
+import { serviceOrderService } from "@/services/supabase/serviceOrderService";
+import { Printer, Smartphone, Table as TableIcon, Activity, CheckCircle2, AlertCircle, FileBarChart2, Search, ChevronDown, PackageSearch, Save, FileDown, CheckCircle, ScanLine, Copy, Loader2, Route as RouteIcon, XCircle } from "lucide-react";
 import { useAppData } from "@/context/AppDataContext";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
@@ -384,7 +384,7 @@ function PartsSummary({ routes, serviceOrders }: { routes: Route[], serviceOrder
 
             const usedParts: { [partCode: string]: { count: number; osNumbers: string[] } } = {};
             const routeStopOSNumbers = new Set(route.stops.map(s => s.serviceOrder));
-            const createdAtDate = route.createdAt instanceof Timestamp ? route.createdAt.toDate() : route.createdAt;
+            const createdAtDate = new Date(route.createdAt);
 
             serviceOrders.forEach(os => {
                 if (
@@ -461,7 +461,7 @@ function PartsSummary({ routes, serviceOrders }: { routes: Route[], serviceOrder
             doc.setFontSize(16);
             doc.text(`Resumo de Utilização de Peças - Rota: ${route.name}`, 14, 20);
             
-            const createdAtDate = route.createdAt instanceof Timestamp ? route.createdAt.toDate() : route.createdAt;
+            const createdAtDate = new Date(route.createdAt);
             if (createdAtDate) {
                 doc.setFontSize(10);
                 doc.text(`Data da Rota: ${createdAtDate.toLocaleDateString('pt-BR')}`, 14, 26);
@@ -581,6 +581,339 @@ function PartsSummary({ routes, serviceOrders }: { routes: Route[], serviceOrder
     );
 }
 
+// ─── Busca de OS em Rotas ───────────────────────────────────────────────────
+function OsRouteSearch() {
+    const [searchTerm, setSearchTerm] = useState("");
+    const [isSearching, setIsSearching] = useState(false);
+    const [results, setResults] = useState<{ route: Route; stop: RouteStop; osStatus: string; usedPartsSet: Set<string>; pendingReason?: string; pendingObservations?: string }[]>([]);
+    const [searched, setSearched] = useState(false);
+
+    const handleSearch = async () => {
+        if (!searchTerm.trim()) return;
+        setIsSearching(true);
+        setSearched(true);
+        setResults([]);
+
+        try {
+            // Busca todas as rotas (ativas e finalizadas) que contenham a OS no campo stops
+            const routesSnapshot = await routeService.getAll();
+
+            const found: { route: Route; stop: RouteStop; osStatus: string; usedPartsSet: Set<string> }[] = [];
+            const term = searchTerm.trim().toLowerCase();
+
+            routesSnapshot.forEach(route => {
+
+                (route.stops || []).forEach(stop => {
+                    const matchesPart = (stop.parts || []).some(
+                        part => part.code?.toLowerCase().includes(term)
+                    );
+                    if (
+                        stop.serviceOrder.toLowerCase().includes(term) ||
+                        stop.consumerName?.toLowerCase().includes(term) ||
+                        stop.model?.toLowerCase().includes(term) ||
+                        matchesPart
+                    ) {
+                        // Determina status da OS dentro da rota
+                        // A rota não tem serviceOrders enriquecidos aqui, então usamos heurística dos campos do stop
+                        const osStatus = "A Fazer"; // fallback — status real vem do serviceOrders collection
+                        found.push({ route, stop, osStatus, usedPartsSet: new Set<string>() });
+                    }
+                });
+            });
+
+            // Agora busca os dados reais das OS para obter o status correto
+            if (found.length > 0) {
+                const osNumbers = [...new Set(found.map(f => f.stop.serviceOrder))];
+                const ordersSnapshot = await serviceOrderService.getByNumbers(osNumbers);
+
+                // Guardar TODAS as ServiceOrders por número (pode haver múltiplas para o mesmo número em rotas diferentes)
+                const osListMap = new Map<string, ServiceOrder[]>();
+                ordersSnapshot.forEach(os => {
+                    const normalized = { ...os } as ServiceOrder;
+                    if (!osListMap.has(os.serviceOrderNumber)) {
+                        osListMap.set(os.serviceOrderNumber, []);
+                    }
+                    osListMap.get(os.serviceOrderNumber)!.push(normalized);
+                });
+
+                // Para cada OS, montar a lista de rotas ordenadas por data (para calcular janela de validade)
+                // Mapa: osNumber -> rotas ordenadas por createdAt ASC
+                const osRouteTimeline = new Map<string, { routeDate: Date; isActive: boolean }[]>();
+                found.forEach(f => {
+                    const routeDate = f.route.createdAt instanceof Date ? f.route.createdAt : null;
+                    if (!routeDate) return;
+                    if (!osRouteTimeline.has(f.stop.serviceOrder)) {
+                        osRouteTimeline.set(f.stop.serviceOrder, []);
+                    }
+                    osRouteTimeline.get(f.stop.serviceOrder)!.push({ routeDate, isActive: f.route.isActive });
+                });
+                // Ordenar cada timeline por data ASC
+                osRouteTimeline.forEach(list => list.sort((a, b) => a.routeDate.getTime() - b.routeDate.getTime()));
+
+                // Para cada resultado, encontrar a ServiceOrder dentro da janela correta
+                const enriched = found.map(f => {
+                    const routeDate = new Date(f.route.createdAt);
+
+                    // Calcular o limite superior da janela:
+                    // Se a rota está ATIVA → sem limite (aceita qualquer OS após createdAt)
+                    // Se a rota está FINALIZADA → fecha na data da próxima rota que contém essa mesma OS
+                    let windowEnd: Date | null = null;
+                    if (!f.route.isActive && routeDate) {
+                        const timeline = osRouteTimeline.get(f.stop.serviceOrder) || [];
+                        const nextRoute = timeline.find(t => t.routeDate.getTime() > routeDate.getTime());
+                        if (nextRoute) {
+                            windowEnd = nextRoute.routeDate;
+                        } else {
+                            // Se a rota está finalizada e não há outra rota depois, 
+                            // a janela de tempo se fecha logo após o fim da rota (ex: arrivalDate + 2 dias)
+                            // Isso impede que lançamentos de hoje reflitam em rotas de meses atrás.
+                            const baseDate = (f.route.arrivalDate instanceof Date) ? f.route.arrivalDate : 
+                                             (f.route.departureDate instanceof Date) ? f.route.departureDate : routeDate;
+                            windowEnd = new Date(baseDate.getTime() + (2 * 24 * 60 * 60 * 1000));
+                        }
+                    }
+
+                    const candidates = osListMap.get(f.stop.serviceOrder) || [];
+                    const relatedList = candidates.filter(os => {
+                        const osDate = os.date as Date;
+                        if (routeDate && !isAfter(osDate, routeDate)) return false; // deve ser após a criação da rota
+                        if (windowEnd && !isAfter(windowEnd, osDate)) return false; // deve ser antes da próxima rota
+                        return true;
+                    });
+                    relatedList.sort((a, b) => ((b.date as Date).getTime()) - ((a.date as Date).getTime()));
+                    const relatedOs = relatedList.length > 0 ? relatedList[0] : null;
+
+                    let osStatus = "A Fazer";
+                    if (relatedOs) {
+                        if (relatedOs.isFinalized) osStatus = "Finalizada";
+                        else if (relatedOs.isFinalized === false) osStatus = "Pendente";
+                    }
+
+                    const usedSet = new Set<string>();
+                    if (relatedOs?.replacedPart) {
+                        relatedOs.replacedPart.split(',').forEach(raw => {
+                            const codeMatch = raw.trim().match(/^([a-zA-Z0-9-]+)/);
+                            if (codeMatch) usedSet.add(codeMatch[0].toUpperCase());
+                        });
+                    }
+
+                    return {
+                        ...f,
+                        osStatus,
+                        usedPartsSet: usedSet,
+                        pendingReason: relatedOs?.isFinalized === false ? (relatedOs.pendingReason || undefined) : undefined,
+                        pendingObservations: relatedOs?.isFinalized === false ? (relatedOs.observations || undefined) : undefined,
+                    };
+                });
+
+                // Ordenar do mais recente ao mais antigo (pela data de saída da rota)
+                enriched.sort((a, b) => {
+                    const dateA = a.route.departureDate instanceof Date ? a.route.departureDate
+                        : a.route.createdAt instanceof Date ? a.route.createdAt : new Date(0);
+                    const dateB = b.route.departureDate instanceof Date ? b.route.departureDate
+                        : b.route.createdAt instanceof Date ? b.route.createdAt : new Date(0);
+                    return dateB.getTime() - dateA.getTime();
+                });
+                setResults(enriched);
+
+
+            } else {
+                setResults([]);
+            }
+        } catch (err) {
+            console.error("Erro ao buscar OS nas rotas:", err);
+        } finally {
+            setIsSearching(false);
+        }
+    };
+
+    const getOsStatusBadge = (status: string) => {
+        switch (status) {
+            case "Finalizada":
+                return <Badge className="bg-green-600 hover:bg-green-700 text-white"><CheckCircle className="mr-1 h-3 w-3" />Finalizada</Badge>;
+            case "Pendente":
+                return <Badge variant="destructive"><XCircle className="mr-1 h-3 w-3" />Pendente</Badge>;
+            default:
+                return <Badge variant="secondary"><AlertCircle className="mr-1 h-3 w-3" />A Fazer</Badge>;
+        }
+    };
+
+    const getRouteStatusBadge = (isActive: boolean) => {
+        return isActive
+            ? <Badge className="bg-blue-600 hover:bg-blue-700 text-white"><RouteIcon className="mr-1 h-3 w-3" />Ativa</Badge>
+            : <Badge variant="outline"><CheckCircle2 className="mr-1 h-3 w-3" />Finalizada</Badge>;
+    };
+
+    return (
+        <div className="space-y-4">
+            <Card>
+                <CardHeader>
+                    <CardTitle>Buscar OS em Rotas</CardTitle>
+                    <CardDescription>Pesquise pelo número da OS, nome do cliente, modelo ou código de peça para encontrar em qual rota ela está (ativa ou finalizada).</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div className="flex gap-2">
+                        <div className="relative flex-1">
+                            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                            <Input
+                                placeholder="Ex: 4000123456, João Silva, UN55, BN96..."
+                                value={searchTerm}
+                                onChange={e => setSearchTerm(e.target.value)}
+                                onKeyDown={e => e.key === "Enter" && handleSearch()}
+                                className="pl-8"
+                            />
+                        </div>
+                        <Button onClick={handleSearch} disabled={isSearching || !searchTerm.trim()}>
+                            {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                            <span className="ml-2 hidden sm:inline">Buscar</span>
+                        </Button>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {isSearching && (
+                <div className="flex items-center justify-center py-10 text-muted-foreground">
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                    Buscando em todas as rotas...
+                </div>
+            )}
+
+            {!isSearching && searched && results.length === 0 && (
+                <Card>
+                    <CardContent className="text-center text-muted-foreground py-10">
+                        <XCircle className="mx-auto h-8 w-8 mb-2 opacity-40" />
+                        <p>Nenhuma rota encontrada para <strong>&quot;{searchTerm}&quot;</strong>.</p>
+                    </CardContent>
+                </Card>
+            )}
+
+            {!isSearching && results.length > 0 && (
+                <div className="space-y-3">
+                    <p className="text-sm text-muted-foreground">{results.length} resultado(s) encontrado(s) para <strong>&quot;{searchTerm}&quot;</strong>.</p>
+                    {results.map((r, i) => (
+                        <Card key={i} className="border-l-4" style={{ borderLeftColor: r.route.isActive ? '#2563eb' : '#6b7280' }}>
+                            <CardHeader className="pb-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                        <RouteIcon className="h-4 w-4 text-muted-foreground" />
+                                        <CardTitle className="text-base">{r.route.name}</CardTitle>
+                                        {getRouteStatusBadge(r.route.isActive)}
+                                    </div>
+                                    {getOsStatusBadge(r.osStatus)}
+                                </div>
+                                <CardDescription>
+                                    {r.route.departureDate instanceof Date
+                                        ? `Saída: ${r.route.departureDate.toLocaleDateString('pt-BR')}`
+                                        : r.route.createdAt instanceof Date
+                                            ? `Criada em: ${r.route.createdAt.toLocaleDateString('pt-BR')}`
+                                            : ''}
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">OS</p>
+                                        <p className="font-mono font-semibold">{r.stop.serviceOrder}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">Cliente</p>
+                                        <p className="font-medium">{r.stop.consumerName || '—'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">Modelo</p>
+                                        <p className="font-medium">{r.stop.model || '—'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">Cidade</p>
+                                        <p className="font-medium">{r.stop.city || '—'}</p>
+                                    </div>
+                                </div>
+
+                                {/* Peças e Rastreios */}
+                                {r.stop.parts && r.stop.parts.length > 0 ? (
+                                    <div className="mt-4">
+                                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Peças da OS</p>
+                                        <div className="rounded-md border overflow-hidden">
+                                            <Table>
+                                                <TableHeader>
+                                                    <TableRow className="bg-muted/50">
+                                                        <TableHead className="text-xs py-2">Código</TableHead>
+                                                        <TableHead className="text-xs py-2">Descrição</TableHead>
+                                                        <TableHead className="text-xs py-2 text-center">Qtd</TableHead>
+                                                        <TableHead className="text-xs py-2 text-center">Status</TableHead>
+                                                        <TableHead className="text-xs py-2">Rastreio</TableHead>
+                                                    </TableRow>
+                                                </TableHeader>
+                                                <TableBody>
+                                                    {r.stop.parts.map(part => {
+                                                        const isUsed = r.usedPartsSet.has(part.code.toUpperCase());
+                                                        return (
+                                                            <TableRow key={part.code}>
+                                                                <TableCell className="font-mono text-xs py-2">{part.code}</TableCell>
+                                                                <TableCell className="text-xs text-muted-foreground py-2">{part.description}</TableCell>
+                                                                <TableCell className="text-center text-xs font-semibold py-2">x{part.quantity}</TableCell>
+                                                                <TableCell className="text-center py-2">
+                                                                    {isUsed ? (
+                                                                        <Badge className="bg-green-600 hover:bg-green-700 text-white text-xs px-2 py-0.5">
+                                                                            <CheckCircle className="mr-1 h-3 w-3" />Usada
+                                                                        </Badge>
+                                                                    ) : (
+                                                                        <Badge variant="secondary" className="text-xs px-2 py-0.5">
+                                                                            Nova
+                                                                        </Badge>
+                                                                    )}
+                                                                </TableCell>
+                                                                <TableCell className="py-2">
+                                                                    {part.trackingCode ? (
+                                                                        <span className="font-mono text-xs bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-300 px-2 py-0.5 rounded">
+                                                                            {part.trackingCode}
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="text-xs text-muted-foreground italic">Sem rastreio</span>
+                                                                    )}
+                                                                </TableCell>
+                                                            </TableRow>
+                                                        );
+                                                    })}
+                                                </TableBody>
+                                            </Table>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="mt-3 text-xs text-muted-foreground italic">Nenhuma peça registrada para esta OS.</p>
+                                )}
+
+                                {r.osStatus === "Pendente" && (
+                                    <div className="mt-3 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 overflow-hidden">
+                                        <div className="px-3 py-2 bg-red-100/60 dark:bg-red-900/30 border-b border-red-200 dark:border-red-800 flex items-center gap-2">
+                                            <XCircle className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />
+                                            <span className="text-xs font-bold text-red-700 dark:text-red-400 uppercase tracking-wide">Registro do Técnico — Pendência</span>
+                                        </div>
+                                        <div className="px-3 py-2 space-y-1">
+                                            {r.pendingReason ? (
+                                                <p className="text-sm text-red-800 dark:text-red-300">
+                                                    <span className="font-bold">Motivo: </span>{r.pendingReason}
+                                                </p>
+                                            ) : (
+                                                <p className="text-sm text-muted-foreground italic">Motivo não registrado pelo técnico.</p>
+                                            )}
+                                            {r.pendingObservations && (
+                                                <p className="text-sm text-red-800 dark:text-red-300">
+                                                    <span className="font-bold">Observações: </span>{r.pendingObservations}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function PartSeparationPage() {
     const { toast } = useToast();
     const [isLoading, setIsLoading] = useState(true);
@@ -596,26 +929,10 @@ export default function PartSeparationPage() {
     const fetchAllData = async () => {
         setIsLoading(true);
         try {
+            const routesData = await routeService.getAll();
             const cutoff30Days = subDays(new Date(), 30);
-            // Only fetch routes from last 30 days (active ones come from context)
-            const routesSnapshot = await getDocs(query(
-                collection(db, "routes"),
-                where("createdAt", ">=", cutoff30Days),
-                orderBy("createdAt", "desc")
-            ));
-
-            const routesData = routesSnapshot.docs.map(doc => {
-                const data = doc.data();
-                const toDate = (ts: any) => ts instanceof Timestamp ? ts.toDate() : ts;
-                return {
-                    id: doc.id,
-                    ...data,
-                    createdAt: toDate(data.createdAt),
-                    departureDate: toDate(data.departureDate),
-                    arrivalDate: toDate(data.arrivalDate),
-                } as Route;
-            });
-            setAllRoutes(routesData);
+            const recentRoutes = routesData.filter(r => r.createdAt >= cutoff30Days);
+            setAllRoutes(recentRoutes);
             
 
             const initialTrackingCodes: typeof trackingCodes = {};
@@ -677,12 +994,11 @@ export default function PartSeparationPage() {
     const handleSavePartTrackingCode = async (routeId: string, stopServiceOrder: string, partToUpdate: RoutePart) => {
         setIsSubmitting(true);
         try {
-            const routeDocRef = doc(db, "routes", routeId);
-            const routeDoc = await getDoc(routeDocRef);
-            if (!routeDoc.exists()) {
+            const routeData = await routeService.getById(routeId);
+            if (!routeData) {
                 throw new Error("Rota não encontrada");
             }
-            const routeData = routeDoc.data() as Route;
+            const currentStops = routeData.stops || [];
             
             const updatedStops = routeData.stops.map(stop => {
                 if (stop.serviceOrder === stopServiceOrder) {
@@ -698,7 +1014,7 @@ export default function PartSeparationPage() {
                 return stop;
             });
 
-            await setDoc(routeDocRef, { stops: updatedStops }, { merge: true });
+            await routeService.update(routeId, { stops: updatedStops });
             
             // Update state locally instead of refetching
             setAllRoutes(prevRoutes => prevRoutes.map(route => 
@@ -733,7 +1049,7 @@ export default function PartSeparationPage() {
                 })),
             }));
             
-            await setDoc(doc(db, "routes", routeId), { stops: updatedStops }, { merge: true });
+            await routeService.update(routeId, { stops: updatedStops });
 
             toast({ title: "Códigos de rastreio salvos!", description: `As informações para a rota ${routeToUpdate.name} foram atualizadas.` });
             await fetchAllData(); // Refresh data from db
@@ -751,7 +1067,7 @@ export default function PartSeparationPage() {
         doc.setFontSize(16);
         doc.text(`Extrato de Peças - Rota: ${route.name}`, 14, 20);
         doc.setFontSize(10);
-        const createdAtDate = route.createdAt instanceof Date ? route.createdAt : (route.createdAt as unknown as Timestamp).toDate();
+        const createdAtDate = new Date(route.createdAt);
         doc.text(`Data de Criação: ${createdAtDate.toLocaleDateString('pt-BR')}`, 14, 26);
 
         type Row = any[];
@@ -837,9 +1153,12 @@ export default function PartSeparationPage() {
                     <p className="text-center text-muted-foreground py-10">Carregando rotas...</p>
                 ) : (
                     <Tabs defaultValue="active">
-                        <TabsList className="grid w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 h-auto gap-2 bg-transparent p-0 mb-4 sm:mb-0 sm:bg-muted sm:p-1 hover:bg-transparent">
-                            <TabsTrigger value="active">Rastreio de Peças (Ativas)</TabsTrigger>
-                            <TabsTrigger value="history">Rastreio de Peças (Concluídas)</TabsTrigger>
+                        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 h-auto gap-2 bg-transparent p-0 mb-4 sm:mb-0 sm:bg-muted sm:p-1 hover:bg-transparent">
+                            <TabsTrigger value="search">
+                                <Search className="mr-2 h-4 w-4" /> Buscar OS em Rotas
+                            </TabsTrigger>
+                            <TabsTrigger value="active">Rastreio (Ativas)</TabsTrigger>
+                            <TabsTrigger value="history">Rastreio (Concluídas)</TabsTrigger>
                             <TabsTrigger value="summary">
                                 <FileBarChart2 className="mr-2 h-4 w-4" /> Conferência de Retorno
                             </TabsTrigger>
@@ -847,6 +1166,9 @@ export default function PartSeparationPage() {
                                 <Smartphone className="mr-2 h-4 w-4" /> Conferência Mobile
                             </TabsTrigger>
                         </TabsList>
+                        <TabsContent value="search" className="mt-6">
+                            <OsRouteSearch />
+                        </TabsContent>
                         <TabsContent value="active" className="mt-6">
                             <RouteList
                                 routes={activeRoutes}

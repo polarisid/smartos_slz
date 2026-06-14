@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Timestamp } from "firebase/firestore";
 import { format, differenceInDays, isAfter } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { useAppData } from "@/context/AppDataContext";
@@ -17,7 +16,7 @@ import { Table, TableHeader, TableRow, TableHead, TableBody } from "@/components
 import { MobileRouteStopCard } from "@/components/MobileRouteStopCard";
 import { RouteDetailsRow } from "@/components/RouteDetailsRow";
 
-import { Map as RouteIcon, Calendar, Sun, MapPin, Car, Eye, Filter, CheckCircle2, Clock, LayoutList } from "lucide-react";
+import { Map as RouteIcon, Calendar, Sun, MapPin, Car, Eye, Filter, CheckCircle2, Clock, LayoutList, Pin, PinOff } from "lucide-react";
 import type { Route, RouteStop } from "@/lib/data";
 export default function RoutesPage() {
     const { activeRoutes, serviceOrders, visitTemplate, dataFetchError, isLoading } = useAppData();
@@ -25,19 +24,27 @@ export default function RoutesPage() {
 
     const [blockedOrders, setBlockedOrders] = useState<Record<string, string>>({});
     const [isBlocksLoaded, setIsBlocksLoaded] = useState(false);
+    const [pinnedRouteId, setPinnedRouteId] = useState<string | null>(null);
 
     useEffect(() => {
         try {
             const saved = localStorage.getItem("blocked_route_orders");
             if (saved) setBlockedOrders(JSON.parse(saved));
-        } catch (e) { console.error("Failed to load blocked orders", e); }
+            const savedPinned = localStorage.getItem("pinned_route_id");
+            if (savedPinned) setPinnedRouteId(savedPinned);
+        } catch (e) { console.error("Failed to load local data", e); }
         setIsBlocksLoaded(true);
     }, []);
 
     useEffect(() => {
         if (!isBlocksLoaded) return;
         localStorage.setItem("blocked_route_orders", JSON.stringify(blockedOrders));
-    }, [blockedOrders, isBlocksLoaded]);
+        if (pinnedRouteId) {
+            localStorage.setItem("pinned_route_id", pinnedRouteId);
+        } else {
+            localStorage.removeItem("pinned_route_id");
+        }
+    }, [blockedOrders, pinnedRouteId, isBlocksLoaded]);
 
     const handleBlock = (serviceOrder: string, reason: string) => {
         setBlockedOrders(prev => ({ ...prev, [serviceOrder]: reason }));
@@ -53,26 +60,30 @@ export default function RoutesPage() {
         toast({ title: "Ordem desbloqueada", description: `A OS ${serviceOrder} foi removida da lista de bloqueios.` });
     };
 
-    const isStopCompleted = (stop: RouteStop, routeCreatedAt: Date | Timestamp) => {
-        const createdAt = routeCreatedAt instanceof Timestamp ? routeCreatedAt.toDate() : routeCreatedAt;
-        const relatedOs = serviceOrders.filter(os =>
-            os.serviceOrderNumber === stop.serviceOrder &&
-            isAfter(os.date, createdAt)
-        );
-        const lastOs = relatedOs.length > 0 ? relatedOs[relatedOs.length - 1] : null;
+    const isStopCompleted = (stop: RouteStop) => {
+        const relatedOs = serviceOrders.filter(os => os.serviceOrderNumber === stop.serviceOrder);
+        relatedOs.sort((a, b) => b.date.getTime() - a.date.getTime());
+        const lastOs = relatedOs.length > 0 ? relatedOs[0] : null;
         return lastOs ? lastOs.isFinalized !== false : false;
     };
 
-    const isStopPending = (stop: RouteStop, routeCreatedAt: Date | Timestamp) => {
-        const createdAt = routeCreatedAt instanceof Timestamp ? routeCreatedAt.toDate() : routeCreatedAt;
-        const relatedOs = serviceOrders.filter(os =>
-            os.serviceOrderNumber === stop.serviceOrder &&
-            isAfter(os.date, createdAt)
-        );
-        const lastOs = relatedOs.length > 0 ? relatedOs[relatedOs.length - 1] : null;
+    const isStopPending = (stop: RouteStop) => {
+        const relatedOs = serviceOrders.filter(os => os.serviceOrderNumber === stop.serviceOrder);
+        relatedOs.sort((a, b) => b.date.getTime() - a.date.getTime());
+        const lastOs = relatedOs.length > 0 ? relatedOs[0] : null;
         return lastOs ? lastOs.isFinalized === false : false;
     };
-    const displayedRoutes = activeRoutes;
+    const displayedRoutes = useMemo(() => {
+        const routes = [...activeRoutes];
+        if (pinnedRouteId) {
+            routes.sort((a, b) => {
+                if (a.id === pinnedRouteId) return -1;
+                if (b.id === pinnedRouteId) return 1;
+                return 0;
+            });
+        }
+        return routes;
+    }, [activeRoutes, pinnedRouteId]);
 
     if (dataFetchError) {
         return <FirebaseSetupPrompt />;
@@ -113,21 +124,17 @@ export default function RoutesPage() {
             <h2 className="text-2xl font-bold tracking-tight">Rotas Ativas da Equipe</h2>
 
             {displayedRoutes.map(route => {
-                const departure = route.departureDate ? (route.departureDate instanceof Timestamp ? route.departureDate.toDate() : route.departureDate) : new Date();
-                const arrival = route.arrivalDate ? (route.arrivalDate instanceof Timestamp ? route.arrivalDate.toDate() : route.arrivalDate) : new Date();
+                const departure = route.departureDate ? route.departureDate : new Date();
+                const arrival = route.arrivalDate ? route.arrivalDate : new Date();
                 const duration = differenceInDays(arrival, departure) + 1;
 
                 const totalStops = route.stops.length;
-                const completedStopsCount = route.stops.filter(stop =>
-                    serviceOrders.some(os =>
-                        os.serviceOrderNumber === stop.serviceOrder && route.createdAt && isAfter(os.date, route.createdAt as Date)
-                    )
-                ).length;
+                const completedStopsCount = route.stops.filter(stop => isStopCompleted(stop)).length;
                 const progress = totalStops > 0 ? (completedStopsCount / totalStops) * 100 : 0;
 
                 const filteredStops = route.stops || [];
                 const filteredCount = filteredStops.length;
-                const pendingCount = route.stops.filter(s => !isStopCompleted(s, route.createdAt as Date | Timestamp)).length;
+                const pendingCount = route.stops.filter(s => !isStopCompleted(s)).length;
                 const doneCount = completedStopsCount;
 
                 return (
@@ -135,12 +142,27 @@ export default function RoutesPage() {
                         <CardHeader className="bg-muted/30">
                             <div className="flex flex-wrap items-start justify-between gap-2">
                                 <div>
-                                    <CardTitle className="flex items-center gap-2 text-primary"><RouteIcon className="w-5 h-5" /> Rota: {route.name}</CardTitle>
+                                    <CardTitle className="flex items-center gap-2 text-primary">
+                                        <RouteIcon className="w-5 h-5" /> Rota: {route.name}
+                                        {pinnedRouteId === route.id && <Pin className="w-4 h-4 text-primary fill-primary/20" />}
+                                    </CardTitle>
                                     <CardDescription>
                                         Técnico responsável: <span className="font-medium text-foreground">{route.technicianName}</span>
                                     </CardDescription>
                                 </div>
-                                <div className="flex gap-2 flex-wrap">
+                                <div className="flex gap-2 flex-wrap items-center">
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className={`h-6 px-2 text-xs ${pinnedRouteId === route.id ? 'bg-primary/10 text-primary hover:bg-primary/20' : 'text-muted-foreground'}`}
+                                        onClick={() => setPinnedRouteId(pinnedRouteId === route.id ? null : route.id)}
+                                    >
+                                        {pinnedRouteId === route.id ? (
+                                            <><PinOff className="h-3 w-3 mr-1" /> Desfixar</>
+                                        ) : (
+                                            <><Pin className="h-3 w-3 mr-1" /> Fixar</>
+                                        )}
+                                    </Button>
                                     <Badge variant="outline" className="gap-1 text-orange-600 border-orange-300 bg-orange-50 dark:bg-orange-900/20">
                                         <Clock className="h-3 w-3" /> {pendingCount} pendentes
                                     </Badge>

@@ -8,8 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { db } from '@/lib/firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { checklistService } from '@/services/supabase/checklistService';
 import { type ChecklistTemplate, type ChecklistField, type RouteStop } from '@/lib/data';
 import { ArrowLeft, PlusCircle, Trash2, Save, Move, TestTube2, Link as LinkIcon, ScanLine } from 'lucide-react';
 import { Document, Page, pdfjs } from 'react-pdf';
@@ -19,7 +18,7 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import dynamic from 'next/dynamic';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
+pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const ScannerDialog = dynamic(
   () => import('@/components/ScannerDialog').then(mod => mod.ScannerDialog),
@@ -241,15 +240,13 @@ export default function EditChecklistPage({ params }: { params: { id: string } }
         const fetchTemplate = async () => {
             setIsLoading(true);
             try {
-                const docRef = doc(db, 'checklistTemplates', id);
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
-                    const data = { id: docSnap.id, ...docSnap.data() } as ChecklistTemplate;
+                const data = await checklistService.getById(id);
+                if (data) {
                     setTemplate(data);
-                    const initialFields = (data.fields || []).map(f => ({
+                    const initialFields = (data.fields || []).map((f: any) => ({
                         ...f,
                         x: f.x || 50,
-                        y: f.y || 50 + (parseInt(f.id.split('-')[1]) * 40)
+                        y: f.y || 50 + (parseInt(f.id.split('-')[1] || "0") * 40)
                     }));
                     setFields(initialFields as FieldWithPosition[]);
                 } else {
@@ -296,8 +293,6 @@ export default function EditChecklistPage({ params }: { params: { id: string } }
         if (!template) return;
         setIsSubmitting(true);
         try {
-            const templateRef = doc(db, 'checklistTemplates', template.id);
-            // Sanitize fields before saving to avoid Firestore errors with 'undefined'
             const fieldsToSave = fields.map(f => {
                 const fieldCopy: Partial<FieldWithPosition> = {...f};
                 if (fieldCopy.variableKey === undefined || fieldCopy.variableKey === 'none') {
@@ -305,7 +300,7 @@ export default function EditChecklistPage({ params }: { params: { id: string } }
                 }
                 return fieldCopy;
             });
-            await updateDoc(templateRef, { fields: fieldsToSave });
+            await checklistService.update(template.id, { fields: fieldsToSave });
             toast({ title: 'Campos salvos!', description: 'As posições e dados dos campos foram atualizados.' });
         } catch (error) {
             console.error('Error saving fields:', error);
@@ -440,48 +435,53 @@ export default function EditChecklistPage({ params }: { params: { id: string } }
                     </aside>
 
                     <main 
-                        className="md:col-span-2 bg-card rounded-lg border p-4 overflow-auto relative"
-                        ref={pdfContainerRef}
+                        className="md:col-span-2 bg-card rounded-lg border p-4 overflow-auto"
                         onMouseMove={handleMouseMove}
                         onMouseUp={handleMouseUp}
                         onMouseLeave={handleMouseUp}
                     >
-                        {template.pdfUrl ? (
-                            <Document
-                                file={pdfUrl}
-                                onLoadSuccess={onDocumentLoadSuccess}
-                                onLoadError={(error) => toast({ variant: 'destructive', title: 'Erro ao carregar PDF', description: error.message })}
-                                className="flex justify-center"
-                                loading="Carregando PDF..."
-                            >
-                                {Array.from(new Array(numPages), (el, index) => (
-                                    <Page key={`page_${index + 1}`} pageNumber={index + 1} renderTextLayer={false} />
-                                ))}
-                            </Document>
-                        ) : (
-                             <div className="flex items-center justify-center h-full text-muted-foreground">
-                                <p>Nenhum PDF associado a este modelo.</p>
-                            </div>
-                        )}
-                        
-                        {fields.map(field => (
-                            <div
-                                key={field.id}
-                                className="absolute flex items-center gap-1 p-1 rounded-sm bg-blue-500/30 border border-blue-600 cursor-move"
-                                style={{ left: `${field.x}px`, top: `${field.y}px` }}
-                                onMouseDown={(e) => handleMouseDown(e, field.id)}
-                            >
-                                <Move className="h-3 w-3 text-blue-800" />
-                                {field.type === 'text' ? (
-                                    <span className="text-xs text-blue-800 bg-white/50 px-2 py-0.5 rounded-sm flex items-center gap-1">
-                                        {field.variableKey && <LinkIcon className="h-3 w-3" />}
-                                        {field.name}
-                                    </span>
-                                ) : (
-                                    <div className="w-4 h-4 border border-blue-800 bg-white/50" />
-                                )}
-                            </div>
-                        ))}
+                        {/* This wrapper must tightly hug the rendered PDF pages so that
+                            absolute-positioned field overlays have the same coordinate
+                            origin as the PDF coordinate system used in pdf-lib. */}
+                        <div ref={pdfContainerRef} className="relative inline-block leading-[0]">
+                            {template.pdfUrl ? (
+                                <Document
+                                    file={pdfUrl}
+                                    onLoadSuccess={onDocumentLoadSuccess}
+                                    onLoadError={(error) => toast({ variant: 'destructive', title: 'Erro ao carregar PDF', description: error.message })}
+                                    loading="Carregando PDF..."
+                                >
+                                    {Array.from(new Array(numPages), (el, index) => (
+                                        <Page key={`page_${index + 1}`} pageNumber={index + 1} renderTextLayer={false} />
+                                    ))}
+                                </Document>
+                            ) : (
+                                <div className="flex items-center justify-center h-64 text-muted-foreground">
+                                    <p>Nenhum PDF associado a este modelo.</p>
+                                </div>
+                            )}
+
+                            {/* Field overlays — absolute within the PDF wrapper, so positions
+                                map 1:1 to the PDF point coordinate system. */}
+                            {fields.map(field => (
+                                <div
+                                    key={field.id}
+                                    className="absolute flex items-center gap-1 p-1 rounded-sm bg-blue-500/30 border border-blue-600 cursor-move"
+                                    style={{ left: `${field.x}px`, top: `${field.y}px` }}
+                                    onMouseDown={(e) => handleMouseDown(e, field.id)}
+                                >
+                                    <Move className="h-3 w-3 text-blue-800" />
+                                    {field.type === 'text' ? (
+                                        <span className="text-xs text-blue-800 bg-white/50 px-2 py-0.5 rounded-sm flex items-center gap-1">
+                                            {field.variableKey && <LinkIcon className="h-3 w-3" />}
+                                            {field.name}
+                                        </span>
+                                    ) : (
+                                        <div className="w-4 h-4 border border-blue-800 bg-white/50" />
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                     </main>
                 </div>
             </div>

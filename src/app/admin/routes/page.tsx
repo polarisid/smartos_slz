@@ -21,8 +21,8 @@ import { Label } from "@/components/ui/label";
 import { PlusCircle, Save, Trash2, Eye, CheckCircle, ChevronDown, Calendar as CalendarIcon, Edit, Users, Truck, Package, PackageOpen, Copy, ArrowUp, ArrowDown, FileDown, Loader2, ArrowRightLeft, MapPin } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { db } from "@/lib/firebase";
-import { collection, addDoc, getDocs, doc, deleteDoc, Timestamp, setDoc, writeBatch, getDoc, query, where, orderBy, limit, startAfter, QueryDocumentSnapshot, DocumentData } from "firebase/firestore";
+import { routeService } from "@/services/supabase/routeService";
+import { driverService } from "@/services/supabase/driverService";
 import { useToast } from "@/hooks/use-toast";
 import { useAppData } from "@/context/AppDataContext";
 import { type Route, type RouteStop, type ServiceOrder, type Technician, type RoutePart, type Driver } from "@/lib/data";
@@ -244,8 +244,8 @@ function RouteForm({
         if (isActive) {
             if (mode === 'edit' && initialData) {
                 setRouteName(initialData.name);
-                setDepartureDate(initialData.departureDate instanceof Timestamp ? initialData.departureDate.toDate() : initialData.departureDate);
-                setArrivalDate(initialData.arrivalDate instanceof Timestamp ? initialData.arrivalDate.toDate() : initialData.arrivalDate);
+                setDepartureDate(initialData.departureDate ? new Date(initialData.departureDate) : undefined);
+                setArrivalDate(initialData.arrivalDate ? new Date(initialData.arrivalDate) : undefined);
                 setRouteType(initialData.routeType);
                 setLicensePlate(initialData.licensePlate || "");
                 setTechnicianId(initialData.technicianId || "");
@@ -428,15 +428,8 @@ function RouteForm({
         setIsLoadingRoutes(true);
         try {
             // Load active routes excluding current one
-            const snap = await getDocs(query(
-                collection(db, "routes"),
-                where("isActive", "==", true),
-                orderBy("createdAt", "desc")
-            ));
-            const routes = snap.docs
-                .map(d => ({ id: d.id, ...d.data() } as Route))
-                .filter(r => r.id !== initialData?.id);
-            setAvailableRoutes(routes);
+            const routes = await routeService.getActiveRoutes();
+            setAvailableRoutes(routes.filter(r => r.id !== initialData?.id));
         } catch (e) {
             toast({ variant: "destructive", title: "Erro", description: "Não foi possível carregar as rotas disponíveis." });
         } finally {
@@ -460,17 +453,17 @@ function RouteForm({
                 return;
             }
 
-            const batch = writeBatch(db);
-
             // Remove from current route
             const newCurrentStops = parsedStops.filter((_, i) => i !== stopToReallocate.index);
-            batch.update(doc(db, "routes", initialData.id), { stops: newCurrentStops });
 
             // Add to target route (appended at end, preserving all data)
             const newTargetStops = [...(targetRoute.stops || []), stopToMove];
-            batch.update(doc(db, "routes", targetRouteId), { stops: newTargetStops });
-
-            await batch.commit();
+            
+            const updates = [
+                { id: initialData.id, data: { stops: newCurrentStops } },
+                { id: targetRouteId, data: { stops: newTargetStops } }
+            ];
+            await routeService.updateBatch(updates);
 
             // Update local state
             setParsedStops(newCurrentStops);
@@ -554,8 +547,8 @@ function RouteForm({
             const dataToSave = {
                 name: routeName,
                 stops: stopsToSave.map(sanitizeStop),
-                departureDate: Timestamp.fromDate(departureDate),
-                arrivalDate: Timestamp.fromDate(arrivalDate),
+                departureDate: departureDate.toISOString(),
+                arrivalDate: arrivalDate.toISOString(),
                 routeType: routeType,
                 licensePlate: licensePlate || '',
                 technicianId: technicianId,
@@ -566,11 +559,12 @@ function RouteForm({
             };
 
             if (mode === 'add') {
-                await addDoc(collection(db, "routes"), {
+                const newRouteData = {
                     ...dataToSave,
-                    createdAt: Timestamp.now(),
+                    createdAt: new Date().toISOString(),
                     isActive: true,
-                });
+                };
+                await routeService.create(newRouteData as unknown as Omit<Route, 'id'>);
                 toast({ title: "Rota salva com sucesso!" });
 
                 await triggerWebhook({
@@ -591,7 +585,7 @@ function RouteForm({
                 });
 
             } else if (initialData) {
-                await setDoc(doc(db, "routes", initialData.id), dataToSave, { merge: true });
+                await routeService.update(initialData.id, dataToSave as unknown as Partial<Route>);
                 toast({ title: "Rota atualizada com sucesso!" });
             }
             
@@ -1004,8 +998,8 @@ function RouteForm({
     );
 }
 
-function RouteDetailsRow({ stop, index, serviceOrders, routeCreatedAt }: { stop: RouteStop, index: number, serviceOrders: ServiceOrder[], routeCreatedAt: Timestamp | Date }) {
-    const createdAtDate = routeCreatedAt instanceof Timestamp ? routeCreatedAt.toDate() : routeCreatedAt;
+function RouteDetailsRow({ stop, index, serviceOrders, routeCreatedAt }: { stop: RouteStop, index: number, serviceOrders: ServiceOrder[], routeCreatedAt: string | Date }) {
+    const createdAtDate = new Date(routeCreatedAt);
     const relatedOsList = serviceOrders.filter(os => 
         os.serviceOrderNumber === stop.serviceOrder && 
         isAfter(os.date, createdAtDate)
@@ -1086,10 +1080,30 @@ function RouteDetailsRow({ stop, index, serviceOrders, routeCreatedAt }: { stop:
                                 <p className="font-semibold text-xs mb-1">Nome Consumidor:</p>
                                 <p className="text-sm text-foreground">{stop.consumerName || "N/A"}</p>
                             </div>
-                            <div>
-                                <p className="font-semibold text-xs mb-1">Status Comment:</p>
-                                <p className="text-sm text-foreground">{stop.statusComment || "N/A"}</p>
-                            </div>
+                            {isPending && (
+                                <div className="rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-2 space-y-1">
+                                    <p className="font-semibold text-xs text-red-700 dark:text-red-400 mb-1">Registro do Técnico (Pendência):</p>
+                                    {relatedOs?.pendingReason && (
+                                        <p className="text-sm text-red-800 dark:text-red-300">
+                                            <span className="font-bold">Motivo: </span>{relatedOs.pendingReason}
+                                        </p>
+                                    )}
+                                    {relatedOs?.observations && (
+                                        <p className="text-sm text-red-800 dark:text-red-300">
+                                            <span className="font-bold">Observações: </span>{relatedOs.observations}
+                                        </p>
+                                    )}
+                                    {!relatedOs?.pendingReason && !relatedOs?.observations && (
+                                        <p className="text-sm text-muted-foreground">Nenhuma observação registrada.</p>
+                                    )}
+                                </div>
+                            )}
+                            {stop.statusComment && (
+                                <div>
+                                    <p className="font-semibold text-xs mb-1">Status ASC:</p>
+                                    <p className="text-sm text-foreground">{stop.statusComment}</p>
+                                </div>
+                            )}
                         </div>
                     </TableCell>
                 </tr>
@@ -1106,7 +1120,7 @@ export default function RoutesPage() {
     const [activeRoutes, setActiveRoutes] = useState<Route[]>([]);
     // --- Inactive routes (paginated) ---
     const [inactiveRoutes, setInactiveRoutes] = useState<Route[]>([]);
-    const [lastInactiveDoc, setLastInactiveDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+    const [lastInactiveDoc, setLastInactiveDoc] = useState<number | null>(null);
     const [hasMoreInactive, setHasMoreInactive] = useState(false);
     const [isLoadingMoreInactive, setIsLoadingMoreInactive] = useState(false);
 
@@ -1114,7 +1128,7 @@ export default function RoutesPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [selectedRoute, setSelectedRoute] = useState<Route | null>(null);
     const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
-    const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+    const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
     const [showOnlyActive, setShowOnlyActive] = useState(true);
 
     const [activeTab, setActiveTab] = useState('list');
@@ -1126,9 +1140,9 @@ export default function RoutesPage() {
     const toRoute = (d: any, data: any): Route => ({
         ...data,
         id: d.id,
-        departureDate: (data.departureDate as Timestamp)?.toDate(),
-        arrivalDate: (data.arrivalDate as Timestamp)?.toDate(),
-        createdAt: (data.createdAt as Timestamp)?.toDate(),
+        departureDate: data.departureDate ? new Date(data.departureDate) : undefined,
+        arrivalDate: data.arrivalDate ? new Date(data.arrivalDate) : undefined,
+        createdAt: data.createdAt ? new Date(data.createdAt) : undefined,
     } as Route);
 
     const fetchRoutes = async () => {
@@ -1136,29 +1150,22 @@ export default function RoutesPage() {
         try {
             const cutoff15Days = subDays(new Date(), 15);
 
-            const [activeSnap, inactiveRecentSnap, driversSnap] = await Promise.all([
+            const [activeRoutesList, inactiveData, driversSnap] = await Promise.all([
                 // All active routes (no limit – should be small)
-                getDocs(query(collection(db, "routes"), where("isActive", "==", true), orderBy("createdAt", "desc"))),
+                routeService.getActiveRoutes(),
                 // Inactive: only last 15 days
-                getDocs(query(
-                    collection(db, "routes"),
-                    where("isActive", "==", false),
-                    where("createdAt", ">=", cutoff15Days),
-                    orderBy("createdAt", "desc"),
-                    limit(INACTIVE_PAGE_SIZE)
-                )),
-                getDocs(collection(db, "drivers"))
+                routeService.getInactiveRoutesPaginated(INACTIVE_PAGE_SIZE, cutoff15Days),
+                driverService.getAll()
             ]);
 
-            setActiveRoutes(activeSnap.docs.map(d => toRoute(d, d.data())));
+            setActiveRoutes(activeRoutesList);
 
-            const inactiveDocs = inactiveRecentSnap.docs;
-            setInactiveRoutes(inactiveDocs.map(d => toRoute(d, d.data())));
+            setInactiveRoutes(inactiveData.routes);
             // If we got a full page, there might be more older ones
-            setLastInactiveDoc(inactiveDocs[inactiveDocs.length - 1] ?? null);
-            setHasMoreInactive(inactiveDocs.length === INACTIVE_PAGE_SIZE);
+            setLastInactiveDoc(inactiveData.lastVisible);
+            setHasMoreInactive(inactiveData.routes.length === INACTIVE_PAGE_SIZE);
 
-            setDrivers(driversSnap.docs.map(d => ({ id: d.id, ...d.data() } as Driver)));
+            setDrivers(driversSnap);
         } catch (error) {
             console.error("Error fetching routes: ", error);
             toast({ variant: "destructive", title: "Erro", description: "Não foi possível carregar as rotas." });
@@ -1171,17 +1178,10 @@ export default function RoutesPage() {
         if (!lastInactiveDoc || isLoadingMoreInactive) return;
         setIsLoadingMoreInactive(true);
         try {
-            const snap = await getDocs(query(
-                collection(db, "routes"),
-                where("isActive", "==", false),
-                orderBy("createdAt", "desc"),
-                startAfter(lastInactiveDoc),
-                limit(INACTIVE_PAGE_SIZE)
-            ));
-            const newDocs = snap.docs;
-            setInactiveRoutes(prev => [...prev, ...newDocs.map(d => toRoute(d, d.data()))]);
-            setLastInactiveDoc(newDocs[newDocs.length - 1] ?? null);
-            setHasMoreInactive(newDocs.length === INACTIVE_PAGE_SIZE);
+            const data = await routeService.getInactiveRoutesPaginated(INACTIVE_PAGE_SIZE, undefined, lastInactiveDoc);
+            setInactiveRoutes(prev => [...prev, ...data.routes]);
+            setLastInactiveDoc(data.lastVisible);
+            setHasMoreInactive(data.routes.length === INACTIVE_PAGE_SIZE);
         } catch (error) {
             toast({ variant: "destructive", title: "Erro", description: "Não foi possível carregar mais rotas." });
         } finally {
@@ -1197,23 +1197,23 @@ export default function RoutesPage() {
     const filteredRoutes = showOnlyActive ? activeRoutes : [...activeRoutes, ...inactiveRoutes];
 
 
-    const handleDelete = async () => {
+    const handleCancelRoute = async () => {
         if (!selectedRoute) return;
         try {
-            await deleteDoc(doc(db, "routes", selectedRoute.id));
-            toast({ title: "Rota excluída com sucesso!" });
-            setIsDeleteDialogOpen(false);
+            await routeService.update(selectedRoute.id, { isActive: false, isCanceled: true });
+            toast({ title: "Rota cancelada com sucesso!" });
+            setIsCancelDialogOpen(false);
             setSelectedRoute(null);
             fetchRoutes();
         } catch (error) {
-            console.error("Error deleting route: ", error);
-            toast({ variant: "destructive", title: "Erro", description: "Não foi possível excluir a rota." });
+            console.error("Error canceling route: ", error);
+            toast({ variant: "destructive", title: "Erro", description: "Não foi possível cancelar a rota." });
         }
     };
     
     const handleFinalizeRoute = async (routeId: string) => {
         try {
-            await setDoc(doc(db, "routes", routeId), { isActive: false }, { merge: true });
+            await routeService.finishRoute(routeId, new Date());
             toast({ title: "Rota finalizada com sucesso!" });
             fetchRoutes(); // refetch to update the list
         } catch (error) {
@@ -1236,8 +1236,25 @@ export default function RoutesPage() {
             const technician = route.technicianName || 'N/A';
             const driver = route.driverName || 'N/A';
             const departure = route.departureDate instanceof Date ? route.departureDate.toLocaleDateString('pt-BR') : '';
+            const routeCreatedAt = route.createdAt instanceof Date ? route.createdAt : (route.createdAt as any)?.toDate?.() ?? new Date(0);
 
             (route.stops || []).forEach((stop: RouteStop) => {
+                // Determine OS status the same way the UI does
+                const relatedOsList = serviceOrders.filter(os =>
+                    os.serviceOrderNumber === stop.serviceOrder &&
+                    isAfter(os.date, routeCreatedAt)
+                );
+                const lastOs = relatedOsList.length > 0 ? relatedOsList[relatedOsList.length - 1] : null;
+
+                let osStatus: string;
+                if (!lastOs) {
+                    osStatus = 'A Fazer';
+                } else if (lastOs.isFinalized === false) {
+                    osStatus = 'Pendente';
+                } else {
+                    osStatus = 'Finalizada';
+                }
+
                 reportData.push({
                     "Nome da Rota": routeName,
                     "Data de Saída": departure,
@@ -1250,7 +1267,8 @@ export default function RoutesPage() {
                     "Bairro": stop.neighborhood || '',
                     "Modelo": stop.model || '',
                     "Tipo de Parada": stop.stopType === 'coleta' ? `Coleta (${stop.collectionType || ''})` : stop.stopType === 'entrega' ? 'Entrega' : 'Padrão',
-                    "Status Comment": stop.statusComment || '',
+                    "Status da OS": osStatus,
+                    "Motivo Pendência": osStatus === 'Pendente' ? (stop.statusComment || '') : '',
                 });
             });
         });
@@ -1273,9 +1291,9 @@ export default function RoutesPage() {
         setIsViewDialogOpen(true);
     };
 
-    const handleOpenDeleteDialog = (route: Route) => {
+    const handleOpenCancelDialog = (route: Route) => {
         setSelectedRoute(route);
-        setIsDeleteDialogOpen(true);
+        setIsCancelDialogOpen(true);
     };
 
     const handleOpenForm = (mode: 'add' | 'edit', route?: Route) => {
@@ -1297,8 +1315,8 @@ export default function RoutesPage() {
                     <CheckCircle className="mr-2 h-4 w-4" /> Finalizar
                 </Button>
             )}
-            <Button variant="destructive" size="sm" onClick={() => handleOpenDeleteDialog(route)}>
-                <Trash2 className="mr-2 h-4 w-4" /> Excluir
+            <Button variant="destructive" size="sm" onClick={() => handleOpenCancelDialog(route)}>
+                <Trash2 className="mr-2 h-4 w-4" /> Cancelar Rota
             </Button>
         </div>
     );
@@ -1402,8 +1420,8 @@ export default function RoutesPage() {
                                                     </div>
                                             </TableCell>
                                             <TableCell>
-                                                    <Badge variant={route.isActive ? "default" : "secondary"}>
-                                                        {route.isActive ? "Ativa" : "Finalizada"}
+                                                    <Badge variant={route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}>
+                                                        {route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
                                                     </Badge>
                                             </TableCell>
                                             <TableCell className="text-right space-x-2">
@@ -1449,8 +1467,8 @@ export default function RoutesPage() {
                                             <CardHeader>
                                                 <div className="flex justify-between items-start">
                                                     <CardTitle>{route.name}</CardTitle>
-                                                    <Badge variant={route.isActive ? "default" : "secondary"}>
-                                                        {route.isActive ? "Ativa" : "Finalizada"}
+                                                    <Badge variant={route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}>
+                                                        {route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
                                                     </Badge>
                                                 </div>
                                             </CardHeader>
@@ -1544,19 +1562,19 @@ export default function RoutesPage() {
                 </DialogContent>
             </Dialog>
 
-            <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+            <AlertDialog open={isCancelDialogOpen} onOpenChange={setIsCancelDialogOpen}>
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>Você tem certeza?</AlertDialogTitle>
                         <AlertDialogDescription>
-                            Esta ação não pode ser desfeita. Isso excluirá permanentemente a rota
+                            Esta ação não pode ser desfeita. Isso cancelará a rota
                             <span className="font-bold mx-1">{selectedRoute?.name}</span>.
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                        <AlertDialogAction onClick={handleDelete} className="bg-destructive hover:bg-destructive/90">
-                           Sim, excluir
+                        <AlertDialogCancel>Voltar</AlertDialogCancel>
+                        <AlertDialogAction onClick={handleCancelRoute} className="bg-destructive hover:bg-destructive/90">
+                           Sim, cancelar
                         </AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>
