@@ -29,7 +29,13 @@ export async function POST() {
         const techSnap = await getDocs(collection(db, 'technicians'));
         const technicians = techSnap.docs.map(doc => {
             const data = convertTimestamps(doc.data());
-            return { id: doc.id, ...data };
+            return {
+                id: doc.id,
+                name: data.name,
+                phone: data.phone || null,
+                goal: data.goal || null,
+                created_at: data.createdAt || new Date().toISOString()
+            };
         });
         if (technicians.length > 0) {
             const { error } = await supabase.from('technicians').upsert(technicians);
@@ -40,7 +46,12 @@ export async function POST() {
         const driverSnap = await getDocs(collection(db, 'drivers'));
         const drivers = driverSnap.docs.map(doc => {
             const data = convertTimestamps(doc.data());
-            return { id: doc.id, ...data };
+            return {
+                id: doc.id,
+                name: data.name,
+                phone: data.phone || null,
+                created_at: data.createdAt || new Date().toISOString()
+            };
         });
         if (drivers.length > 0) {
             const { error } = await supabase.from('drivers').upsert(drivers);
@@ -109,6 +120,24 @@ export async function POST() {
                 const { error } = await supabase.from('service_orders').upsert(chunk);
                 if (error) console.error("Error syncing service orders chunk:", error);
             }
+        }
+
+        // 5. Sync Checklists
+        const checklistsSnap = await getDocs(collection(db, 'checklistTemplates'));
+        const checklists = checklistsSnap.docs.map(doc => {
+            const data = convertTimestamps(doc.data());
+            return {
+                id: doc.id,
+                name: data.name,
+                pdf_url: data.pdfUrl || '',
+                type: data.type || 'counter',
+                fields: data.fields || [],
+                created_at: data.createdAt || new Date().toISOString()
+            };
+        });
+        if (checklists.length > 0) {
+            const { error } = await supabase.from('checklists').upsert(checklists);
+            if (error) console.error("Error syncing checklists:", error);
         }
 
         return NextResponse.json({ success: true, message: 'Sync completed successfully' });

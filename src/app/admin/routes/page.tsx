@@ -1114,7 +1114,7 @@ function RouteDetailsRow({ stop, index, serviceOrders, routeCreatedAt }: { stop:
 
 export default function RoutesPage() {
     const { toast } = useToast();
-    const { serviceOrders, technicians, isLoading: contextLoading } = useAppData();
+    const { serviceOrders, technicians, refreshDynamicData, isLoading: contextLoading } = useAppData();
 
     // --- Active routes (always fully loaded) ---
     const [activeRoutes, setActiveRoutes] = useState<Route[]>([]);
@@ -1205,6 +1205,7 @@ export default function RoutesPage() {
             setIsCancelDialogOpen(false);
             setSelectedRoute(null);
             fetchRoutes();
+            refreshDynamicData();
         } catch (error) {
             console.error("Error canceling route: ", error);
             toast({ variant: "destructive", title: "Erro", description: "Não foi possível cancelar a rota." });
@@ -1216,6 +1217,7 @@ export default function RoutesPage() {
             await routeService.finishRoute(routeId, new Date());
             toast({ title: "Rota finalizada com sucesso!" });
             fetchRoutes(); // refetch to update the list
+            refreshDynamicData();
         } catch (error) {
             console.error("Error finalizing route: ", error);
             toast({ variant: "destructive", title: "Erro", description: "Não foi possível finalizar a rota." });
@@ -1510,6 +1512,7 @@ export default function RoutesPage() {
                             onCancel={() => setActiveTab('list')}
                             onRouteSaved={() => {
                                 fetchRoutes();
+                                refreshDynamicData();
                                 setActiveTab('list');
                             }}
                             initialData={selectedRouteForEdit}
