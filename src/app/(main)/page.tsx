@@ -548,6 +548,7 @@ export default function OsFormPage() {
   const [generatedText, setGeneratedText] = useState("");
   const [osIsSaved, setOsIsSaved] = useState(false);
   const [assistantName, setAssistantName] = useState("");
+  const [localTechnician, setLocalTechnician] = useState("");
   const [currentRouteStop, setCurrentRouteStop] = useState<RouteStop | null>(null);
   const [partsStatus, setPartsStatus] = useState<Record<string, 'used' | 'not_used' | null>>({});
   const [partsUsedQuantity, setPartsUsedQuantity] = useState<Record<string, number>>({});
@@ -632,9 +633,10 @@ const { toast } = useToast();
    useEffect(() => {
         try {
             const savedFormData = localStorage.getItem('serviceOrderFormData');
-            if (savedFormData) {
-                const parsedData = JSON.parse(savedFormData);
-                form.reset(parsedData);
+            let parsedData = savedFormData ? JSON.parse(savedFormData) : null;
+            
+            if (parsedData && Object.keys(parsedData).length > 0) {
+                form.reset({ ...form.getValues(), ...parsedData });
             }
         } catch (e) {
             console.error("Failed to parse form data from localStorage", e);
@@ -642,9 +644,11 @@ const { toast } = useToast();
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); 
 
-  useEffect(() => {
+    useEffect(() => {
       localStorage.setItem('serviceOrderFormData', JSON.stringify(allFormValues));
-  }, [allFormValues]);
+    }, [allFormValues]);
+
+
 
    useEffect(() => {
       localStorage.setItem('checklistFormData', JSON.stringify(checklistData));
@@ -666,6 +670,11 @@ const { toast } = useToast();
         const savedAssistant = localStorage.getItem("assistantName");
         if (savedAssistant) {
             setAssistantName(savedAssistant);
+        }
+        const savedTechnician = localStorage.getItem('lastTechnician');
+        if (savedTechnician) {
+            setLocalTechnician(savedTechnician);
+            setValue('technician', savedTechnician);
         }
     } catch (error) {
         console.error("Failed to parse data from localStorage", error);
@@ -889,9 +898,8 @@ const { toast } = useToast();
   };
   
   const resetForm = () => {
-    const technicianBeforeReset = form.getValues("technician");
     form.reset({
-        technician: technicianBeforeReset,
+        technician: localTechnician,
         serviceOrderNumber: "",
         serviceType: "",
         samsungRepairType: "",
@@ -926,10 +934,11 @@ pendingReason: "",
     resetForm();
     localStorage.removeItem('serviceOrderFormData');
     localStorage.removeItem('checklistFormData');
-    localStorage.removeItem('assistantName');
-    setAssistantName("");
-    form.reset({ technician: "" });
-    toast({ title: "Formulário Limpo", description: "Todos os dados foram removidos." });
+    // Não removemos assistantName nem lastTechnician
+    
+    setValue('technician', localTechnician);
+    
+    toast({ title: "Formulário Limpo", description: "Todos os dados da OS foram removidos, mas a equipe foi mantida." });
   }
 
   const handlePartStatusChange = (partCode: string, status: 'used' | 'not_used') => {
@@ -1041,17 +1050,30 @@ pendingReason: "",
                                                     )}/>
 
                                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                                        <FormField control={form.control} name="technician" render={({ field }) => (
+                                                        <FormField control={form.control} name="technician" render={() => (
                                                             <FormItem>
                                                                 <FormLabel>Técnico</FormLabel>
-                                                                <Select onValueChange={field.onChange} value={field.value}>
-                                                                    <FormControl><SelectTrigger><SelectValue placeholder="Técnico" /></SelectTrigger></FormControl>
-                                                                    <SelectContent>
-                                                                        {technicians.map((tech) => (
-                                                                            <SelectItem key={tech.id} value={tech.id}>{tech.name}</SelectItem>
-                                                                        ))}
-                                                                    </SelectContent>
-                                                                </Select>
+                                                                {technicians.length === 0 ? (
+                                                                    <Select disabled>
+                                                                        <FormControl><SelectTrigger><SelectValue placeholder="Carregando..." /></SelectTrigger></FormControl>
+                                                                    </Select>
+                                                                ) : (
+                                                                    <Select 
+                                                                        onValueChange={(val) => {
+                                                                            setLocalTechnician(val);
+                                                                            setValue('technician', val, { shouldValidate: true, shouldDirty: true });
+                                                                            localStorage.setItem('lastTechnician', val);
+                                                                        }} 
+                                                                        value={localTechnician || undefined}
+                                                                    >
+                                                                        <FormControl><SelectTrigger><SelectValue placeholder="Selecione o Técnico" /></SelectTrigger></FormControl>
+                                                                        <SelectContent>
+                                                                            {technicians.map((tech) => (
+                                                                                <SelectItem key={tech.id} value={tech.id}>{tech.name}</SelectItem>
+                                                                            ))}
+                                                                        </SelectContent>
+                                                                    </Select>
+                                                                )}
                                                                 <FormMessage />
                                                             </FormItem>
                                                         )}/>
