@@ -75,6 +75,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         };
 
         if (user) {
+            setLoading(true);
             fetchProfile(user.id);
         }
     }, [user]);
