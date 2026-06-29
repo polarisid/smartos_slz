@@ -212,10 +212,12 @@ export type Route = {
 export type ChecklistField = {
   id: string;
   name: string;
-  type: 'text' | 'checkbox';
+  type: 'text' | 'checkbox' | 'signature';
   page: number;
   x: number;
   y: number;
+  width?: number;
+  height?: number;
   variableKey?: string;
 }
 

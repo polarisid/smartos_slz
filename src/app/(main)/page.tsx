@@ -76,6 +76,7 @@ import React from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { ptBR } from 'date-fns/locale';
+import SignatureCanvas from 'react-signature-canvas';
 import dynamic from "next/dynamic";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { FirebaseSetupPrompt } from "@/components/FirebaseSetupPrompt";
@@ -306,6 +307,7 @@ function ChecklistSection({
     const [isGenerating, setIsGenerating] = useState(false);
     const [isScannerOpen, setIsScannerOpen] = useState(false);
     const [scanTargetField, setScanTargetField] = useState<string | null>(null);
+    const signatureRefs = useRef<Record<string, any>>({});
 
     useEffect(() => {
         if (selectedTemplate) {
@@ -384,10 +386,28 @@ function ChecklistSection({
             const pages = pdfDoc.getPages();
             const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
             
-            fields.forEach(field => {
+            for (const field of fields) {
                 const value = checklistData[field.id];
                 
-                if (value !== undefined && value !== null) {
+                if (field.type === 'signature') {
+                    const canvas = signatureRefs.current[field.id];
+                    if (canvas && !canvas.isEmpty()) {
+                        const base64Data = canvas.toDataURL('image/png');
+                        const pngImage = await pdfDoc.embedPng(base64Data);
+                        const w = field.width || 150;
+                        const h = field.height || 40; 
+                        const pageToDraw = pages[field.page - 1] || pages[0];
+                        if (pageToDraw) {
+                            const pageHeight = pageToDraw.getHeight();
+                            pageToDraw.drawImage(pngImage, {
+                                x: field.x,
+                                y: pageHeight - field.y - h,
+                                width: w,
+                                height: h,
+                            });
+                        }
+                    }
+                } else if (value !== undefined && value !== null) {
                     const pageToDraw = pages[field.page - 1] || pages[0];
                     if (pageToDraw) {
                         const pageHeight = pageToDraw.getHeight();
@@ -398,7 +418,7 @@ function ChecklistSection({
                         }
                     }
                 }
-            });
+            }
 
             const pdfBytes = await pdfDoc.save();
 
@@ -471,7 +491,7 @@ function ChecklistSection({
                                                     </Button>
                                                 )}
                                             </div>
-                                        ) : (
+                                        ) : field.type === 'checkbox' ? (
                                             <div className="flex items-center space-x-2">
                                                 <input 
                                                     type="checkbox" 
@@ -481,6 +501,21 @@ function ChecklistSection({
                                                     onChange={(e) => handleInputChange(field.id, e.target.checked)} 
                                                 />
                                                 <label htmlFor={`fill-${field.id}`} className="text-sm">Marcar</label>
+                                            </div>
+                                        ) : (
+                                            <div className="border rounded-md overflow-hidden bg-white shadow-sm border-gray-300">
+                                                <SignatureCanvas 
+                                                    ref={(ref) => {
+                                                        if (ref) signatureRefs.current[field.id] = ref;
+                                                    }}
+                                                    penColor="black"
+                                                    canvasProps={{
+                                                        className: 'signature-canvas w-full h-40'
+                                                    }}
+                                                />
+                                                <div className="bg-muted p-1 flex justify-end border-t">
+                                                    <Button type="button" variant="ghost" size="sm" onClick={() => signatureRefs.current[field.id]?.clear()}>Limpar Assinatura</Button>
+                                                </div>
                                             </div>
                                         )}
                                     </div>
