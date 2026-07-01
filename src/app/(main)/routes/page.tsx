@@ -3,8 +3,8 @@
 import { useState, useEffect, useMemo } from "react";
 import { format, differenceInDays, isAfter } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
-import { useAppData } from "@/context/AppDataContext";
-import { FirebaseSetupPrompt } from "@/components/FirebaseSetupPrompt";
+import { useActiveRoutes, useServiceOrders, useVisitTemplate } from "@/hooks/queries";
+import { AlertCircle } from "lucide-react";
 
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,13 @@ import { RouteDetailsRow } from "@/components/RouteDetailsRow";
 import { Map as RouteIcon, Calendar, Sun, MapPin, Car, Eye, Filter, CheckCircle2, Clock, LayoutList, Pin, PinOff } from "lucide-react";
 import type { Route, RouteStop } from "@/lib/data";
 export default function RoutesPage() {
-    const { activeRoutes, serviceOrders, visitTemplate, dataFetchError, isLoading } = useAppData();
+    const { data: activeRoutes = [], isError: errRoutes, isLoading: loadingRoutes } = useActiveRoutes();
+    const { data: serviceOrders = [], isError: errSo, isLoading: loadingSo } = useServiceOrders(2000);
+    const { data: visitTemplate = "", isError: errTemplate, isLoading: loadingTemplate } = useVisitTemplate();
+    
+    const dataFetchError = errRoutes || errSo || errTemplate;
+    const isLoading = loadingRoutes || loadingSo || loadingTemplate;
+
     const { toast } = useToast();
 
     const [blockedOrders, setBlockedOrders] = useState<Record<string, string>>({});
@@ -86,7 +92,15 @@ export default function RoutesPage() {
     }, [activeRoutes, pinnedRouteId]);
 
     if (dataFetchError) {
-        return <FirebaseSetupPrompt />;
+        return (
+          <div className="flex flex-col items-center justify-center p-12 text-center h-[50vh]">
+            <div className="rounded-full bg-destructive/10 p-4 mb-4">
+              <AlertCircle className="h-8 w-8 text-destructive" />
+            </div>
+            <h2 className="text-xl font-bold text-slate-800 dark:text-slate-200 mb-2">Erro de Conexão</h2>
+            <p className="text-slate-500 max-w-md">Não foi possível conectar ao banco de dados. Verifique sua conexão com a internet ou tente novamente mais tarde.</p>
+          </div>
+        );
     }
 
     if (isLoading) {

@@ -37,7 +37,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
-import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle, AlertCircle } from "lucide-react";
 import Link from 'next/link';
 
 import { serviceOrderService } from "@/services/supabase/serviceOrderService";
@@ -79,8 +79,8 @@ import { ptBR } from 'date-fns/locale';
 import SignatureCanvas from 'react-signature-canvas';
 import dynamic from "next/dynamic";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { FirebaseSetupPrompt } from "@/components/FirebaseSetupPrompt";
-import { useAppData } from "@/context/AppDataContext";
+import { useTechnicians, usePresets, useCodes, useActiveRoutes, useChecklists, useVisitTemplate } from "@/hooks/queries";
+import { useQueryClient } from "@tanstack/react-query";
 
 const ScannerDialog = dynamic(
   () => import('@/components/ScannerDialog').then(mod => mod.ScannerDialog),
@@ -544,7 +544,17 @@ function ChecklistSection({
 }
 
 export default function OsFormPage() {
-  const { symptomCodes, repairCodes, technicians, presets, activeRoutes, checklistTemplates, visitTemplate, dataFetchError, refreshDynamicData } = useAppData();
+  const queryClient = useQueryClient();
+  const { data: technicians = [], isError: errTech } = useTechnicians();
+  const { data: presets = [], isError: errPresets } = usePresets();
+  const { data: activeRoutes = [], isError: errRoutes } = useActiveRoutes();
+  const { data: checklistTemplates = [], isError: errChecklists } = useChecklists();
+  const { data: visitTemplate = "", isError: errTemplate } = useVisitTemplate();
+  const { data: codes = { symptomCodes: { "TV/AV": [], "DA": [] }, repairCodes: { "TV/AV": [], "DA": [] } }, isError: errCodes } = useCodes();
+  const { symptomCodes, repairCodes } = codes;
+
+  const dataFetchError = errTech || errPresets || errRoutes || errChecklists || errTemplate || errCodes;
+  const refreshDynamicData = () => queryClient.invalidateQueries();
   const [generatedText, setGeneratedText] = useState("");
   const [osIsSaved, setOsIsSaved] = useState(false);
   const [assistantName, setAssistantName] = useState("");
@@ -553,7 +563,7 @@ export default function OsFormPage() {
   const [partsStatus, setPartsStatus] = useState<Record<string, 'used' | 'not_used' | null>>({});
   const [partsUsedQuantity, setPartsUsedQuantity] = useState<Record<string, number>>({});
   const [checklistData, setChecklistData] = useState<Record<string, string | boolean>>({});
-const { toast } = useToast();
+  const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(1);
   const totalSteps = 4;
 
@@ -628,27 +638,34 @@ const { toast } = useToast();
     setCurrentStep(prev => Math.max(prev - 1, 1));
   };
 
-  const allFormValues = form.watch();
+  const saveTimeout = useRef<NodeJS.Timeout>();
+  const [debouncedValues, setDebouncedValues] = useState<FormValues>(form.getValues());
 
-   useEffect(() => {
-        try {
-            const savedFormData = localStorage.getItem('serviceOrderFormData');
-            let parsedData = savedFormData ? JSON.parse(savedFormData) : null;
-            
-            if (parsedData && Object.keys(parsedData).length > 0) {
-                form.reset({ ...form.getValues(), ...parsedData });
-            }
-        } catch (e) {
-            console.error("Failed to parse form data from localStorage", e);
+  useEffect(() => {
+    try {
+        const savedFormData = localStorage.getItem('serviceOrderFormData');
+        let parsedData = savedFormData ? JSON.parse(savedFormData) : null;
+        
+        if (parsedData && Object.keys(parsedData).length > 0) {
+            const newValues = { ...form.getValues(), ...parsedData };
+            form.reset(newValues);
+            setDebouncedValues(newValues);
         }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); 
+    } catch (e) {
+        console.error("Failed to parse form data from localStorage", e);
+    }
+  }, []); 
 
-    useEffect(() => {
-      localStorage.setItem('serviceOrderFormData', JSON.stringify(allFormValues));
-    }, [allFormValues]);
-
-
+  useEffect(() => {
+    const subscription = form.watch((values) => {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = setTimeout(() => {
+            localStorage.setItem('serviceOrderFormData', JSON.stringify(values));
+            setDebouncedValues(values as FormValues);
+        }, 1000);
+    });
+    return () => subscription.unsubscribe();
+  }, [form]);
 
    useEffect(() => {
       localStorage.setItem('checklistFormData', JSON.stringify(checklistData));
@@ -760,7 +777,7 @@ const { toast } = useToast();
 
 
   const previewText = useMemo(() => {
-    const data = allFormValues;
+    const data = debouncedValues;
     const tech = technicians.find(t => t.id === data.technician);
     let technicianName = tech?.name || '';
     if (assistantName) {
@@ -817,7 +834,7 @@ const { toast } = useToast();
     ].filter(Boolean);
 
     return [...baseTextParts, ...serviceSpecificParts, ...optionalParts].filter(Boolean).join('\n');
-  }, [allFormValues, technicians, assistantName, symptomCodes, repairCodes]);
+  }, [debouncedValues, technicians, assistantName, symptomCodes, repairCodes]);
 
   const onSubmit = async (data: FormValues) => {
     // Bloquear envio se há peças da rota não revisadas
@@ -965,7 +982,15 @@ pendingReason: "",
   const hasUnreviewedParts = routeParts.length > 0 && reviewedCount < routeParts.length;
 
   if (dataFetchError) {
-    return <FirebaseSetupPrompt />;
+    return (
+      <div className="flex flex-col items-center justify-center p-12 text-center h-[50vh]">
+        <div className="rounded-full bg-destructive/10 p-4 mb-4">
+          <AlertCircle className="h-8 w-8 text-destructive" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-800 dark:text-slate-200 mb-2">Erro de Conexão</h2>
+        <p className="text-slate-500 max-w-md">Não foi possível conectar ao banco de dados. Verifique sua conexão com a internet ou tente novamente mais tarde.</p>
+      </div>
+    );
   }
 
   return (
@@ -1515,7 +1540,7 @@ pendingReason: "",
                                 <ChecklistSection 
                                     checklistTemplates={checklistTemplates}
                                     routeStopData={currentRouteStop}
-                                    mainFormData={allFormValues}
+                                    mainFormData={debouncedValues}
                                     checklistData={checklistData}
                                     onChecklistDataChange={setChecklistData}
                                     technicianName={technicians.find(t => t.id === watchedTechnician)?.name}

@@ -1,8 +1,8 @@
 "use client";
-import { useAppData } from "@/context/AppDataContext";
-import { FirebaseSetupPrompt } from "@/components/FirebaseSetupPrompt";
+import { useTechnicians, useServiceOrders, useReturns, useIndicators, useChargebacks } from "@/hooks/queries";
 import dynamic from "next/dynamic";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AlertCircle } from "lucide-react";
 
 const PerformanceDashboard = dynamic(
   () => import("@/components/dashboard/PerformanceDashboard").then(m => m.PerformanceDashboard),
@@ -21,10 +21,24 @@ const PerformanceDashboard = dynamic(
 );
 
 export default function DashboardPage() {
-  const { technicians, serviceOrders, returns, indicators, chargebacks, dataFetchError } = useAppData();
+  const { data: technicians = [], isError: errTech } = useTechnicians();
+  const { data: serviceOrders = [], isError: errSo } = useServiceOrders(2000);
+  const { data: returns = [], isError: errRet } = useReturns();
+  const { data: indicators = [], isError: errInd } = useIndicators();
+  const { data: chargebacks = [], isError: errChar } = useChargebacks();
   
+  const dataFetchError = errTech || errSo || errRet || errInd || errChar;
+
   if (dataFetchError) {
-      return <FirebaseSetupPrompt />;
+      return (
+        <div className="flex flex-col items-center justify-center p-12 text-center h-[50vh]">
+          <div className="rounded-full bg-destructive/10 p-4 mb-4">
+            <AlertCircle className="h-8 w-8 text-destructive" />
+          </div>
+          <h2 className="text-xl font-bold text-slate-800 dark:text-slate-200 mb-2">Erro de Conexão</h2>
+          <p className="text-slate-500 max-w-md">Não foi possível conectar ao banco de dados. Verifique sua conexão com a internet ou tente novamente mais tarde.</p>
+        </div>
+      );
   }
 
   return (
