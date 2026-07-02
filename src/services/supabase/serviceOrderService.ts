@@ -111,7 +111,13 @@ export const serviceOrderService = {
   },
 
   async create(data: Omit<ServiceOrder, 'id'>): Promise<string> {
-    const dbData = this.mapToDb(data as ServiceOrder);
+    const generatedId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : (Math.random().toString(36).substring(2, 15) + Date.now().toString(36));
+    const dbData = {
+      id: generatedId,
+      ...this.mapToDb(data as ServiceOrder)
+    };
     const { data: newDoc, error } = await supabase
       .from('service_orders')
       .insert(dbData)

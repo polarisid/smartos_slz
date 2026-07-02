@@ -1,18 +1,16 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
 
-// This route uses the SERVICE_ROLE_KEY to create users without affecting
-// the current admin session. This key must NEVER be exposed on the client.
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  return createClient(url, key, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
     },
-  }
-);
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,6 +21,8 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       );
     }
+
+    const supabaseAdmin = getSupabaseAdmin();
 
     const { email, password, name, role } = await req.json();
 

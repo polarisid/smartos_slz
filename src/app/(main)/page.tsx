@@ -79,6 +79,7 @@ import { ptBR } from 'date-fns/locale';
 import SignatureCanvas from 'react-signature-canvas';
 import dynamic from "next/dynamic";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+
 import { useTechnicians, usePresets, useCodes, useActiveRoutes, useChecklists, useVisitTemplate } from "@/hooks/queries";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -557,13 +558,14 @@ export default function OsFormPage() {
   const refreshDynamicData = () => queryClient.invalidateQueries();
   const [generatedText, setGeneratedText] = useState("");
   const [osIsSaved, setOsIsSaved] = useState(false);
+  const [isSuccessDialogOpen, setIsSuccessDialogOpen] = useState(false);
   const [assistantName, setAssistantName] = useState("");
   const [localTechnician, setLocalTechnician] = useState("");
   const [currentRouteStop, setCurrentRouteStop] = useState<RouteStop | null>(null);
   const [partsStatus, setPartsStatus] = useState<Record<string, 'used' | 'not_used' | null>>({});
   const [partsUsedQuantity, setPartsUsedQuantity] = useState<Record<string, number>>({});
   const [checklistData, setChecklistData] = useState<Record<string, string | boolean>>({});
-  const { toast } = useToast();
+const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(1);
   const totalSteps = 4;
 
@@ -638,34 +640,27 @@ export default function OsFormPage() {
     setCurrentStep(prev => Math.max(prev - 1, 1));
   };
 
-  const saveTimeout = useRef<NodeJS.Timeout>();
-  const [debouncedValues, setDebouncedValues] = useState<FormValues>(form.getValues());
+  const allFormValues = form.watch();
 
-  useEffect(() => {
-    try {
-        const savedFormData = localStorage.getItem('serviceOrderFormData');
-        let parsedData = savedFormData ? JSON.parse(savedFormData) : null;
-        
-        if (parsedData && Object.keys(parsedData).length > 0) {
-            const newValues = { ...form.getValues(), ...parsedData };
-            form.reset(newValues);
-            setDebouncedValues(newValues);
+   useEffect(() => {
+        try {
+            const savedFormData = localStorage.getItem('serviceOrderFormData');
+            let parsedData = savedFormData ? JSON.parse(savedFormData) : null;
+            
+            if (parsedData && Object.keys(parsedData).length > 0) {
+                form.reset({ ...form.getValues(), ...parsedData });
+            }
+        } catch (e) {
+            console.error("Failed to parse form data from localStorage", e);
         }
-    } catch (e) {
-        console.error("Failed to parse form data from localStorage", e);
-    }
-  }, []); 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); 
 
-  useEffect(() => {
-    const subscription = form.watch((values) => {
-        clearTimeout(saveTimeout.current);
-        saveTimeout.current = setTimeout(() => {
-            localStorage.setItem('serviceOrderFormData', JSON.stringify(values));
-            setDebouncedValues(values as FormValues);
-        }, 1000);
-    });
-    return () => subscription.unsubscribe();
-  }, [form]);
+    useEffect(() => {
+      localStorage.setItem('serviceOrderFormData', JSON.stringify(allFormValues));
+    }, [allFormValues]);
+
+
 
    useEffect(() => {
       localStorage.setItem('checklistFormData', JSON.stringify(checklistData));
@@ -714,17 +709,33 @@ export default function OsFormPage() {
   useEffect(() => {
     const selectedPreset = presets.find(p => p.id === watchedPreset);
     if (selectedPreset) {
-      setValue("symptomCode", selectedPreset.symptomCode);
-      setValue("repairCode", selectedPreset.repairCode);
-      setValue("replacedPart", selectedPreset.replacedPart || "");
-      setValue("observations", selectedPreset.observations || "");
+      if (form.getValues("symptomCode") !== selectedPreset.symptomCode) {
+        setValue("symptomCode", selectedPreset.symptomCode);
+      }
+      if (form.getValues("repairCode") !== selectedPreset.repairCode) {
+        setValue("repairCode", selectedPreset.repairCode);
+      }
+      if (form.getValues("replacedPart") !== (selectedPreset.replacedPart || "")) {
+        setValue("replacedPart", selectedPreset.replacedPart || "");
+      }
+      if (form.getValues("observations") !== (selectedPreset.observations || "")) {
+        setValue("observations", selectedPreset.observations || "");
+      }
     } else if (watchedPreset === "none") {
-      setValue("symptomCode", "");
-      setValue("repairCode", "");
-      setValue("replacedPart", "");
-      setValue("observations", "");
+      if (form.getValues("symptomCode") !== "") {
+        setValue("symptomCode", "");
+      }
+      if (form.getValues("repairCode") !== "") {
+        setValue("repairCode", "");
+      }
+      if (form.getValues("replacedPart") !== "") {
+        setValue("replacedPart", "");
+      }
+      if (form.getValues("observations") !== "") {
+        setValue("observations", "");
+      }
     }
-  }, [watchedPreset, presets, setValue]);
+  }, [watchedPreset, presets, setValue, form]);
 
   const previousOsRef = useRef<string | null>(null);
 
@@ -738,7 +749,11 @@ export default function OsFormPage() {
                 break;
             }
         }
-        setCurrentRouteStop(foundStop);
+        
+        const isSame = JSON.stringify(foundStop) === JSON.stringify(currentRouteStop);
+        if (!isSame) {
+            setCurrentRouteStop(foundStop);
+        }
         
         // Reset part status ONLY when OS number actually changes
         if (previousOsRef.current !== watchedServiceOrderNumber) {
@@ -756,13 +771,15 @@ export default function OsFormPage() {
             previousOsRef.current = watchedServiceOrderNumber;
         }
     } else {
-        setCurrentRouteStop(null);
+        if (currentRouteStop !== null) {
+            setCurrentRouteStop(null);
+        }
         if (previousOsRef.current !== null) {
             setOsIsSaved(false);
             previousOsRef.current = null;
         }
     }
-  }, [watchedServiceOrderNumber, activeRoutes, setValue]);
+  }, [watchedServiceOrderNumber, activeRoutes, setValue, currentRouteStop]);
   
   useEffect(() => {
     const replacedPartText = (currentRouteStop?.parts || [])
@@ -772,12 +789,15 @@ export default function OsFormPage() {
             return usedQty > 1 ? `${p.code} (x${usedQty})` : p.code;
         })
         .join(', ');
-    setValue("replacedPart", replacedPartText);
-  }, [partsStatus, partsUsedQuantity, currentRouteStop, setValue]);
+    
+    if (form.getValues("replacedPart") !== replacedPartText) {
+        setValue("replacedPart", replacedPartText);
+    }
+  }, [partsStatus, partsUsedQuantity, currentRouteStop, setValue, form]);
 
 
   const previewText = useMemo(() => {
-    const data = debouncedValues;
+    const data = allFormValues;
     const tech = technicians.find(t => t.id === data.technician);
     let technicianName = tech?.name || '';
     if (assistantName) {
@@ -834,7 +854,7 @@ export default function OsFormPage() {
     ].filter(Boolean);
 
     return [...baseTextParts, ...serviceSpecificParts, ...optionalParts].filter(Boolean).join('\n');
-  }, [debouncedValues, technicians, assistantName, symptomCodes, repairCodes]);
+  }, [allFormValues, technicians, assistantName, symptomCodes, repairCodes]);
 
   const onSubmit = async (data: FormValues) => {
     // Bloquear envio se há peças da rota não revisadas
@@ -877,6 +897,7 @@ export default function OsFormPage() {
 
         await serviceOrderService.create(newServiceOrder as Omit<ServiceOrder, 'id'>);
         setOsIsSaved(true);
+        setIsSuccessDialogOpen(true);
         toast({
             title: "OS Lançada com Sucesso!",
             description: `A ordem de serviço ${data.serviceOrderNumber} foi salva.`,
@@ -936,8 +957,9 @@ export default function OsFormPage() {
         isFinalized: true,
 pendingReason: "",
     });
-    setGeneratedText("");
+     setGeneratedText("");
     setOsIsSaved(false);
+    setIsSuccessDialogOpen(false);
     setChecklistData({});
     setCurrentStep(1);
     setPartsUsedQuantity({});
@@ -1488,14 +1510,14 @@ pendingReason: "",
                                                         Próximo
                                                     </Button>
                                                 ) : (
-                                                    <Button type="button" onClick={form.handleSubmit(onSubmit)} className="flex-1 h-12 bg-[#1a85ff] hover:bg-[#156fc2] text-white text-base md:text-sm font-medium shadow-none transition-all">
+                                                    <Button type="button" onClick={form.handleSubmit(onSubmit)} disabled={form.formState.isSubmitting || osIsSaved} className="flex-1 h-12 bg-[#1a85ff] hover:bg-[#156fc2] text-white text-base md:text-sm font-medium shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                                                         {form.watch('isFinalized') ? (
                                                             <div className="flex items-center justify-center gap-2">
-                                                                <CheckCircle className="h-4 w-4" /> Salvar OS
+                                                                <CheckCircle className="h-4 w-4" /> {form.formState.isSubmitting ? 'Salvando...' : osIsSaved ? 'Salva!' : 'Salvar OS'}
                                                             </div>
                                                         ) : (
                                                             <div className="flex items-center justify-center gap-2">
-                                                                <AlertTriangle className="h-4 w-4" /> Salvar Pendência
+                                                                <AlertTriangle className="h-4 w-4" /> {form.formState.isSubmitting ? 'Salvando...' : osIsSaved ? 'Salva!' : 'Salvar Pendência'}
                                                             </div>
                                                         )}
                                                     </Button>
@@ -1540,13 +1562,49 @@ pendingReason: "",
                                 <ChecklistSection 
                                     checklistTemplates={checklistTemplates}
                                     routeStopData={currentRouteStop}
-                                    mainFormData={debouncedValues}
+                                    mainFormData={allFormValues}
                                     checklistData={checklistData}
                                     onChecklistDataChange={setChecklistData}
                                     technicianName={technicians.find(t => t.id === watchedTechnician)?.name}
                                 />
                             </div>
                         </div>
+            {/* Success Dialog */}
+            <Dialog open={isSuccessDialogOpen} onOpenChange={setIsSuccessDialogOpen}>
+                <DialogContent className="sm:max-w-[500px]">
+                    <DialogHeader>
+                        <DialogTitle className="text-green-600 dark:text-green-400 flex items-center gap-2">
+                            <CheckCircle className="h-6 w-6" /> OS Lançada com Sucesso!
+                        </DialogTitle>
+                        <DialogDescription>
+                            Ordem de Serviço salva no banco de dados. Copie o resumo formatado abaixo:
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="my-4">
+                        <pre className="whitespace-pre-wrap text-sm bg-muted p-4 rounded-md font-sans max-h-[300px] overflow-y-auto">
+                            {generatedText}
+                        </pre>
+                    </div>
+                    <DialogFooter className="flex flex-col sm:flex-row gap-2">
+                        <Button
+                            className="w-full sm:flex-1 bg-[#1a85ff] hover:bg-[#156fc2]"
+                            onClick={handleCopy}
+                        >
+                            <Copy className="mr-2 h-4 w-4" /> Copiar Texto
+                        </Button>
+                        <Button
+                            variant="outline"
+                            className="w-full sm:flex-1"
+                            onClick={() => {
+                                setIsSuccessDialogOpen(false);
+                                handleNewOS();
+                            }}
+                        >
+                            Nova OS
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
   );
 }

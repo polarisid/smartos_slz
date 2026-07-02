@@ -49,7 +49,7 @@ export default function UsersPage() {
     });
 
     const { toast } = useToast();
-    const { } = useAuth(); // kept for future use
+    const { signup } = useAuth();
 
     const fetchUsers = async () => {
         setIsLoading(true);
@@ -126,35 +126,26 @@ export default function UsersPage() {
             setFormError('Todos os campos são obrigatórios.');
             return;
         }
-        if (formState.password.length < 6) {
-            setFormError('A senha deve ter pelo menos 6 caracteres.');
-            return;
-        }
         setFormError('');
         setIsSubmitting(true);
         try {
-            const res = await fetch('/api/admin/create-user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formState),
-            });
-            const json = await res.json();
-
-            if (!res.ok) {
-                setFormError(json.error || 'Falha ao criar conta. Por favor, tente novamente.');
-                return;
-            }
-
+            await signup(formState.email, formState.password, formState.name, formState.role);
             toast({ title: "Usuário criado com sucesso!" });
             setIsAddUserDialogOpen(false);
             await fetchUsers();
         } catch (err: any) {
-            setFormError('Falha ao criar conta. Verifique sua conexão e tente novamente.');
+            let errorMessage = "Ocorreu um erro desconhecido.";
+            switch (err.code) {
+                case 'auth/email-already-in-use': errorMessage = 'Este email já está em uso.'; break;
+                case 'auth/invalid-email': errorMessage = 'O formato do email é inválido.'; break;
+                case 'auth/weak-password': errorMessage = 'A senha é muito fraca. Use pelo menos 6 caracteres.'; break;
+                default: errorMessage = 'Falha ao criar conta. Por favor, tente novamente.'; break;
+            }
+            setFormError(errorMessage);
         } finally {
             setIsSubmitting(false);
         }
     }
-
 
     const roleLabels: Record<AppUser['role'], string> = {
         admin: 'Admin',
