@@ -37,7 +37,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
-import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle, AlertCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle, AlertCircle, Tv } from "lucide-react";
 import Link from 'next/link';
 
 import { serviceOrderService } from "@/services/supabase/serviceOrderService";
@@ -544,6 +544,34 @@ function ChecklistSection({
     );
 }
 
+function inferEquipmentType(stop: RouteStop): "TV/AV" | "DA" | null {
+  if (!stop) return null;
+  
+  // 1. Check by productType (SPD) if available
+  const spd = (stop.productType || "").toUpperCase().trim();
+  if (spd) {
+    if (/^(TV|VD|MNT|MON|LFD|AUD|HTS|AV|AUDIO|HE|VISUAL)/.test(spd)) {
+      return "TV/AV";
+    }
+    if (/^(DA|REF|W\/M|WM|MWO|AC|RAC|FJM|CAC|PAC|DW|DISH|HOME|APPLIANCE)/.test(spd)) {
+      return "DA";
+    }
+  }
+  
+  // 2. Check by Model prefix (very accurate for Samsung)
+  const model = (stop.model || "").toUpperCase().trim();
+  if (model) {
+    if (/^(UN|QN|LH|LS|PL|CL|LN|HW|MX)/.test(model)) {
+      return "TV/AV";
+    }
+    if (/^(RF|RS|RT|RB|RH|RL|WD|WF|WA|DV|AR|AS|AM|MC|MS|ME|DW|NQ)/.test(model)) {
+      return "DA";
+    }
+  }
+  
+  return null;
+}
+
 export default function OsFormPage() {
   const queryClient = useQueryClient();
   const { data: technicians = [], isError: errTech } = useTechnicians();
@@ -754,6 +782,14 @@ const { toast } = useToast();
         if (!isSame) {
             setCurrentRouteStop(foundStop);
         }
+
+        // Infer and set equipmentType automatically if found in active route
+        if (foundStop) {
+            const inferred = inferEquipmentType(foundStop);
+            if (inferred && form.getValues("equipmentType") !== inferred) {
+                setValue("equipmentType", inferred);
+            }
+        }
         
         // Reset part status ONLY when OS number actually changes
         if (previousOsRef.current !== watchedServiceOrderNumber) {
@@ -779,7 +815,7 @@ const { toast } = useToast();
             previousOsRef.current = null;
         }
     }
-  }, [watchedServiceOrderNumber, activeRoutes, setValue, currentRouteStop]);
+  }, [watchedServiceOrderNumber, activeRoutes, setValue, currentRouteStop, form]);
   
   useEffect(() => {
     const replacedPartText = (currentRouteStop?.parts || [])
@@ -1026,7 +1062,7 @@ pendingReason: "",
                                             Preencha os campos abaixo para gerar o texto da ordem de serviço.
                                         </CardDescription>
                                     </div>
-                                    <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2 scrollbar-hide">
+                                    <div className="flex items-center justify-between w-full max-w-md mt-4">
                                         {[
                                             { step: 1, title: 'Básico', icon: User },
                                             { step: 2, title: 'Status', icon: Package },
@@ -1037,18 +1073,28 @@ pendingReason: "",
                                             const isActive = currentStep === s.step;
                                             const isCompleted = currentStep > s.step;
                                             return (
-                                                <div key={s.step} className="flex items-center min-w-max">
-                                                    <div className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-colors ${
-                                                        isActive ? 'border-[#1a85ff] bg-[#1a85ff] text-white' : 
-                                                        isCompleted ? 'border-[#1a85ff] bg-transparent text-[#1a85ff]' : 
-                                                        'border-muted bg-transparent text-muted-foreground'
-                                                    }`}>
-                                                        <Icon className="h-4 w-4" />
+                                                <div key={s.step} className="flex items-center flex-1 last:flex-initial">
+                                                    <div className="flex items-center">
+                                                        <div className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-all shrink-0 ${
+                                                            isActive ? 'border-[#1a85ff] bg-[#1a85ff] text-white shadow-sm scale-105' : 
+                                                            isCompleted ? 'border-[#1a85ff] bg-transparent text-[#1a85ff]' : 
+                                                            'border-muted bg-transparent text-muted-foreground'
+                                                        }`}>
+                                                            <Icon className="h-4 w-4" />
+                                                        </div>
+                                                        <span className={cn(
+                                                            "ml-2 text-sm font-semibold transition-all whitespace-nowrap",
+                                                            isActive ? "text-foreground inline" : "text-muted-foreground hidden md:inline"
+                                                        )}>
+                                                            {s.title}
+                                                        </span>
                                                     </div>
-                                                    <span className={`ml-2 text-sm font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}>
-                                                        {s.title}
-                                                    </span>
-                                                    {index < 3 && <div className={`w-8 md:w-12 h-[2px] ml-2 ${isCompleted ? 'bg-[#1a85ff]' : 'bg-muted'}`} />}
+                                                    {index < 3 && (
+                                                        <div className={cn(
+                                                            "flex-1 h-[2px] mx-2 min-w-[0.75rem] transition-colors duration-300",
+                                                            isCompleted ? 'bg-[#1a85ff]' : 'bg-muted'
+                                                        )} />
+                                                    )}
                                                 </div>
                                             )
                                         })}
@@ -1063,18 +1109,43 @@ pendingReason: "",
                                             {currentStep === 1 && (
                                                 <div className="space-y-4 md:space-y-5 animate-in slide-in-from-right-4 fade-in duration-300">
                                                     <FormField control={form.control} name="equipmentType" render={({ field }) => (
-                                                        <FormItem>
-                                                            <FormLabel>Tipo de Aparelho</FormLabel>
-                                                            <Select onValueChange={field.onChange} value={field.value}>
-                                                                <FormControl><SelectTrigger><SelectValue placeholder="Selecione o tipo de aparelho" /></SelectTrigger></FormControl>
-                                                                <SelectContent>
-                                                                    <SelectItem value="TV/AV">TV/AV</SelectItem>
-                                                                    <SelectItem value="DA">DA (Linha Branca)</SelectItem>
-                                                                </SelectContent>
-                                                            </Select>
-                                                            <FormMessage />
-                                                        </FormItem>
-                                                    )}/>
+                                                         <FormItem className="space-y-2">
+                                                             <FormLabel>Tipo de Aparelho</FormLabel>
+                                                             <FormControl>
+                                                                 <div className="grid grid-cols-2 gap-3">
+                                                                     <Button
+                                                                         type="button"
+                                                                         variant={field.value === "TV/AV" ? "default" : "outline"}
+                                                                         className={cn(
+                                                                             "h-14 flex items-center justify-center gap-2 border text-sm font-semibold transition-all rounded-lg w-full",
+                                                                             field.value === "TV/AV" 
+                                                                                 ? "border-primary bg-primary text-primary-foreground shadow-sm" 
+                                                                                 : "border-input bg-background hover:bg-accent hover:text-accent-foreground"
+                                                                         )}
+                                                                         onClick={() => field.onChange("TV/AV")}
+                                                                     >
+                                                                         <Tv className="h-5 w-5 shrink-0" />
+                                                                         <span>TV / AV</span>
+                                                                     </Button>
+                                                                     <Button
+                                                                         type="button"
+                                                                         variant={field.value === "DA" ? "default" : "outline"}
+                                                                         className={cn(
+                                                                             "h-14 flex items-center justify-center gap-2 border text-sm font-semibold transition-all rounded-lg w-full",
+                                                                             field.value === "DA" 
+                                                                                 ? "border-primary bg-primary text-primary-foreground shadow-sm" 
+                                                                                 : "border-input bg-background hover:bg-accent hover:text-accent-foreground"
+                                                                         )}
+                                                                         onClick={() => field.onChange("DA")}
+                                                                     >
+                                                                         <Wrench className="h-5 w-5 shrink-0" />
+                                                                         <span>DA (Linha Branca)</span>
+                                                                     </Button>
+                                                                 </div>
+                                                             </FormControl>
+                                                             <FormMessage />
+                                                         </FormItem>
+                                                     )}/>
                                                     
                                                     <FormField control={form.control} name="presetId" render={({ field }) => (
                                                         <FormItem>
