@@ -35,6 +35,22 @@ export function useActiveRoutes() {
   });
 }
 
+export function useDraftRoutes() {
+  return useQuery({
+    queryKey: ['routes', 'draft'],
+    queryFn: () => routeService.getDraftRoutes(),
+    staleTime: 30 * 1000, // 30s — planejamento muda frequentemente
+  });
+}
+
+export function useAllRoutes() {
+  return useQuery({
+    queryKey: ['routes', 'all'],
+    queryFn: () => routeService.getAll(),
+    staleTime: 2 * 60 * 1000,
+  });
+}
+
 export function useReturns() {
   return useQuery({
     queryKey: ['returns'],

@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -57,6 +57,7 @@ const formSchema = z.object({
   partsRequested: z.string().optional(),
   productCollectedOrInstalled: z.string().optional(),
   cleaningPerformed: z.boolean().optional(),
+  samsungLpSurveyPerformed: z.boolean().optional(),
 });
 type FormValues = z.infer<typeof formSchema>;
 
@@ -80,6 +81,19 @@ export default function ServiceOrdersPage() {
   const [hasMore, setHasMore] = useState(true);
   const [lastDoc, setLastDoc] = useState<any>(null);
   const [techMap, setTechMap] = useState<Record<string, string>>({});
+  const [surveyFilter, setSurveyFilter] = useState<'all' | 'completed' | 'pending'>('all');
+
+  const filteredServiceOrders = useMemo(() => {
+    return serviceOrders.filter(order => {
+      if (surveyFilter === 'all') return true;
+      const hasSurvey = order.samsungRepairType === 'LP' && order.observations?.includes('[Pesquisa LP realizada: Sim]');
+      if (surveyFilter === 'completed') return hasSurvey;
+      if (surveyFilter === 'pending') {
+        return order.samsungRepairType === 'LP' && !order.observations?.includes('[Pesquisa LP realizada: Sim]');
+      }
+      return true;
+    });
+  }, [serviceOrders, surveyFilter]);
 
   // Search state
   const [searchTerm, setSearchTerm] = useState("");
@@ -177,6 +191,11 @@ export default function ServiceOrdersPage() {
   // --- EDIT / DELETE ---
   const handleOpenEditDialog = (order: ServiceOrder) => {
     setSelectedOrder(order);
+    const isSurveyYes = order.observations?.includes('[Pesquisa LP realizada: Sim]') || false;
+    const cleanObs = order.observations
+      ?.replace(/\n?\[Pesquisa LP realizada: (Sim|Não)\]/g, "")
+      .trim() || "";
+
     form.reset({
       serviceOrderNumber: order.serviceOrderNumber,
       serviceType: order.serviceType,
@@ -187,11 +206,12 @@ export default function ServiceOrdersPage() {
       symptomCode: order.symptomCode || "",
       repairCode: order.repairCode || "",
       replacedPart: order.replacedPart || "",
-      observations: order.observations || "",
+      observations: cleanObs,
       defectFound: order.defectFound || "",
       partsRequested: order.partsRequested || "",
       productCollectedOrInstalled: order.productCollectedOrInstalled || "",
       cleaningPerformed: order.cleaningPerformed || false,
+      samsungLpSurveyPerformed: isSurveyYes,
     });
     setIsFormDialogOpen(true);
   };
@@ -205,11 +225,16 @@ export default function ServiceOrdersPage() {
     if (!selectedOrder) return;
     setIsSubmitting(true);
     try {
+      const finalObs = (data.samsungRepairType === 'LP' && data.samsungLpSurveyPerformed)
+        ? `${data.observations || ''}\n[Pesquisa LP realizada: Sim]`.trim()
+        : data.observations || '';
+
       const updatedData: Partial<ServiceOrder> = {
         ...data,
         equipmentType: data.equipmentType as "TV/AV" | "DA",
         serviceType: data.serviceType as any,
         samsungBudgetValue: data.samsungBudgetValue ? parseFloat(data.samsungBudgetValue) : 0,
+        observations: finalObs,
       };
       await serviceOrderService.update(selectedOrder.id, updatedData);
       setServiceOrders(prev => prev.map(o => o.id === selectedOrder.id ? { ...o, ...updatedData, technicianName: o.technicianName } : o));
@@ -254,30 +279,46 @@ export default function ServiceOrdersPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  placeholder="Número da OS (ex: 4801234567)"
-                  className="pl-9"
-                  value={searchInput}
-                  onChange={e => setSearchInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                />
-              </div>
-              <Button onClick={handleSearch} disabled={isSearching}>
-                {isSearching ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Search className="h-4 w-4 mr-2" />}
-                Buscar
-              </Button>
-              {searchTerm && (
-                <Button variant="outline" onClick={() => {
-                  setSearchInput("");
-                  setSearchTerm("");
-                  loadInitialOrders(techMap);
-                }}>
-                  <FilterX className="h-4 w-4 mr-2" /> Limpar
+            <div className="flex flex-col md:flex-row gap-4">
+              <div className="flex flex-1 gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Número da OS (ex: 4801234567)"
+                    className="pl-9"
+                    value={searchInput}
+                    onChange={e => setSearchInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                  />
+                </div>
+                <Button onClick={handleSearch} disabled={isSearching}>
+                  {isSearching ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Search className="h-4 w-4 mr-2" />}
+                  Buscar
                 </Button>
-              )}
+                {searchTerm && (
+                  <Button variant="outline" onClick={() => {
+                    setSearchInput("");
+                    setSearchTerm("");
+                    loadInitialOrders(techMap);
+                  }}>
+                    <FilterX className="h-4 w-4 mr-2" /> Limpar
+                  </Button>
+                )}
+              </div>
+              
+              <div className="flex items-center gap-2 min-w-[260px]">
+                <Label htmlFor="survey-filter" className="text-xs shrink-0 font-bold">Pesquisa LP:</Label>
+                <Select value={surveyFilter} onValueChange={(v: any) => setSurveyFilter(v)}>
+                  <SelectTrigger id="survey-filter" className="h-10 text-sm">
+                    <SelectValue placeholder="Filtrar por pesquisa..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todas as OSs</SelectItem>
+                    <SelectItem value="completed">Com Pesquisa Realizada</SelectItem>
+                    <SelectItem value="pending">Pesquisa LP Pendente</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             {searchTerm && (
               <p className="text-sm text-muted-foreground mt-2">
@@ -295,8 +336,10 @@ export default function ServiceOrdersPage() {
                 <CardTitle>Atendimentos Registrados</CardTitle>
                 <CardDescription>
                   {searchTerm
-                    ? `${serviceOrders.length} resultado(s) encontrado(s)`
-                    : `Exibindo os ${serviceOrders.length} registros mais recentes`}
+                    ? `${filteredServiceOrders.length} resultado(s) encontrado(s)`
+                    : surveyFilter !== 'all'
+                      ? `Exibindo ${filteredServiceOrders.length} OSs correspondentes ao filtro (de ${serviceOrders.length} carregadas)`
+                      : `Exibindo as ${serviceOrders.length} OSs mais recentes`}
                 </CardDescription>
               </div>
               {!searchTerm && (
@@ -326,12 +369,32 @@ export default function ServiceOrdersPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {serviceOrders.length > 0 ? serviceOrders.map(order => (
+                    {filteredServiceOrders.length > 0 ? filteredServiceOrders.map(order => (
                       <TableRow key={order.id}>
                         <TableCell className="font-mono">{order.serviceOrderNumber}</TableCell>
                         <TableCell>{format(order.date, 'dd/MM/yyyy')}</TableCell>
                         <TableCell>{order.technicianName}</TableCell>
-                        <TableCell>{serviceTypeLabels[order.serviceType] || order.serviceType}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1.5 items-start">
+                            <span className="font-semibold text-slate-800 dark:text-slate-200">
+                              {serviceTypeLabels[order.serviceType] || order.serviceType}
+                              {order.samsungRepairType ? ` - ${order.samsungRepairType}` : ''}
+                            </span>
+                            {order.samsungRepairType === 'LP' && (
+                              <div>
+                                {order.observations?.includes('[Pesquisa LP realizada: Sim]') ? (
+                                  <Badge className="bg-green-50 hover:bg-green-50 text-green-700 dark:bg-green-950/40 dark:text-green-300 text-[10px] px-1.5 py-0 border-green-200">
+                                    ✓ Pesquisa Realizada
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="destructive" className="bg-rose-50 hover:bg-rose-50 text-rose-700 dark:bg-rose-955/20 dark:text-rose-300 text-[10px] px-1.5 py-0 border-rose-200">
+                                    ⚠ Pesquisa Pendente
+                                  </Badge>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell>
                           {order.samsungBudgetApproved && order.samsungBudgetValue ? (
                             <span className="font-mono text-green-600">
@@ -354,7 +417,7 @@ export default function ServiceOrdersPage() {
                     )) : (
                       <TableRow>
                         <TableCell colSpan={7} className="text-center h-24 text-muted-foreground">
-                          {searchTerm ? "Nenhuma OS encontrada para este número." : "Nenhuma ordem de serviço registrada."}
+                          {searchTerm ? "Nenhuma OS encontrada para este número." : surveyFilter !== 'all' ? "Nenhuma ordem de serviço corresponde a este filtro de pesquisa." : "Nenhuma ordem de serviço registrada."}
                         </TableCell>
                       </TableRow>
                     )}
@@ -430,16 +493,35 @@ export default function ServiceOrdersPage() {
             </div>
 
             {watchedServiceType === 'reparo_samsung' && (
-              <div className="space-y-2">
-                <Label>Sub-tipo Reparo Samsung</Label>
-                <Select value={form.watch('samsungRepairType')} onValueChange={(v) => form.setValue('samsungRepairType', v)}>
-                  <SelectTrigger><SelectValue placeholder="LP / OW / VOID" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="LP">LP</SelectItem>
-                    <SelectItem value="OW">OW</SelectItem>
-                    <SelectItem value="VOID">VOID</SelectItem>
-                  </SelectContent>
-                </Select>
+              <div className="space-y-4 pl-4 border-l-2 border-primary/50">
+                <div className="space-y-2">
+                  <Label>Sub-tipo Reparo Samsung</Label>
+                  <Select value={form.watch('samsungRepairType')} onValueChange={(v) => form.setValue('samsungRepairType', v)}>
+                    <SelectTrigger><SelectValue placeholder="LP / OW / VOID" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="LP">LP</SelectItem>
+                      <SelectItem value="OW">OW</SelectItem>
+                      <SelectItem value="VOID">VOID</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {form.watch('samsungRepairType') === 'LP' && (
+                  <div className="flex items-center justify-between rounded-lg border p-4 bg-amber-50/50 dark:bg-amber-955/10 border-amber-200 dark:border-amber-900">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="admin-lp-survey" className="font-bold text-amber-800 dark:text-amber-400">
+                        Pesquisa LP Realizada?
+                      </Label>
+                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                        Marque se o técnico concluiu a pesquisa Medallia Contigo.
+                      </p>
+                    </div>
+                    <Switch 
+                      id="admin-lp-survey" 
+                      checked={form.watch('samsungLpSurveyPerformed') || false} 
+                      onCheckedChange={(c) => form.setValue('samsungLpSurveyPerformed', c)} 
+                    />
+                  </div>
+                )}
               </div>
             )}
 
