@@ -173,6 +173,7 @@ export type RouteStop = {
     city: string;
     neighborhood: string;
     state: string;
+    zipCode: string;
     model: string;
     turn: string;
     tat: string;
@@ -191,6 +192,11 @@ export type RouteStop = {
     addressDetails?: string;
     isReallocated?: boolean;
     reallocatedToRouteName?: string;
+    zipMismatch?: boolean;
+    zipMismatchDetails?: string;
+    suggestedCityState?: string;
+    confirmedByCall?: boolean;
+    confirmedByMessage?: boolean;
 }
 
 export type Route = {
@@ -211,6 +217,7 @@ export type Route = {
     driverId?: string;
     driverName?: string;
     driverPhone?: string;
+    fuelAvgKml?: number;
 }
 
 export type ChecklistField = {

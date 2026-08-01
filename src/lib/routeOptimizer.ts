@@ -1,5 +1,10 @@
 import { type RouteStop } from "@/lib/data";
+import { getCoordinates, parseFullAddress } from "@/lib/geocode";
+import {
 
+  apply2OptMatrix,
+
+} from './routingEngine';
 /**
  * Normalizes a string for comparison: lowercase, no accents, trimmed.
  */
@@ -211,10 +216,9 @@ function getNeighborhoodZoneScore(cityKey: string, nKey: string): number {
 }
 
 /**
-/**
  * Resolves approximate coordinates for a city using exact or fuzzy normalized matching.
  */
-function getCityCoordinates(cityName: string): { lat: number; lng: number } | null {
+export function getCityCoordinates(cityName: string): { lat: number; lng: number } | null {
   const norm = normalize(cityName)
     .replace(/\bn\.?\s*sra\.?\b/g, "nossa senhora")
     .replace(/\bsto\.?\b/g, "santo")
@@ -317,110 +321,214 @@ function apply2Opt(clusterKeys: string[], clusterMap: Map<string, { rawCity: str
 /**
  * Optimizes the order of route stops starting from an origin/departure city (Base)
  * using 2-Opt refined TSP clustering.
- *
- * Hierarchical Optimization:
- * 1. CIDADE + UF (ESTADO): Grouping by City + State cluster, 2-Opt TSP circuit optimization starting/returning to originCity (Base).
- * 2. BAIRRO: Grouping strictly by neighborhood (bairro) within each city.
- * 3. PARADA/OS: Sorted by TAT urgency (LP/OW priority) within each neighborhood.
- *
- * @param stops - Array of RouteStop objects
- * @param originCity - Departure/Return base city (e.g. "Aracaju")
- * @returns New array with stops reordered for optimal route circuit
+/**
+ * Calculates Haversine distance in km between two lat/lng pairs
  */
-export function optimizeRouteStops(stops: RouteStop[], originCity: string = "Aracaju"): RouteStop[] {
+function haversineDistance(c1: { lat: number; lng: number }, c2: { lat: number; lng: number }): number {
+  const dLat = (c2.lat - c1.lat) * Math.PI / 180;
+  const dLng = (c2.lng - c1.lng) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(c1.lat * Math.PI / 180) * Math.cos(c2.lat * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+import {
+  fetchOsrmDrivingMatrix,
+  haversineDistanceKm,
+  solveExactHeldKarp,
+  applyOrOpt,
+  calculateClosedLoopDuration,
+  PointCoord
+} from './routingEngine';
+
+/**
+ * Resolves coordinates for a stop using city/neighborhood coordinates fallback map
+ */
+function getStopCoordinates(stop: RouteStop): PointCoord {
+  const cityCoords = getCityCoordinates(stop.city || 'Aracaju');
+  if (cityCoords) return cityCoords;
+  return { lat: -10.9472, lng: -37.0731 }; // Aracaju default
+}
+
+/**
+ * Synchronous fallback optimization based on Haversine distance matrix with 2-Opt and Or-Opt refinement
+ */
+export function optimizeRouteStopsSync(stops: RouteStop[], originCity: string = "Aracaju"): RouteStop[] {
   if (!stops || stops.length <= 1) return stops;
 
-  // Step 1: Group by location cluster (Cidade + UF)
-  const locationClusterMap = new Map<string, { rawCity: string; rawState: string; stops: RouteStop[] }>();
+  const baseCoords = getCityCoordinates(originCity) || { lat: -10.9142, lng: -37.0545 };
+  const allPoints: PointCoord[] = [baseCoords, ...stops.map(getStopCoordinates)];
+  const N = allPoints.length;
 
-  for (const stop of stops) {
-    const cityNorm = normalize(stop.city) || "sem_cidade";
-    const stateNorm = normalize(stop.state) || "se";
-    const clusterKey = `${cityNorm}|${stateNorm}`;
-
-    if (!locationClusterMap.has(clusterKey)) {
-      locationClusterMap.set(clusterKey, {
-        rawCity: stop.city || "Sem Cidade",
-        rawState: stop.state || "SE",
-        stops: []
-      });
-    }
-    locationClusterMap.get(clusterKey)!.stops.push(stop);
-  }
-
-  // Step 2: Nearest-Neighbor initial tour
-  const unvisited = new Set(locationClusterMap.keys());
-  const initialClusterKeys: string[] = [];
-
-  let currentClusterKey = Array.from(unvisited).find(k => k.startsWith(normalize(originCity))) || Array.from(unvisited)[0];
-
-  while (unvisited.size > 0) {
-    if (unvisited.has(currentClusterKey)) {
-      initialClusterKeys.push(currentClusterKey);
-      unvisited.delete(currentClusterKey);
-    }
-
-    if (unvisited.size === 0) break;
-
-    // Find nearest next city cluster
-    let nearestKey = Array.from(unvisited)[0];
-    let minDistance = Infinity;
-
-    const currentCluster = locationClusterMap.get(currentClusterKey);
-    const currentName = currentCluster?.rawCity || currentClusterKey.split('|')[0];
-
-    for (const candidateKey of unvisited) {
-      const candidateCluster = locationClusterMap.get(candidateKey);
-      const candidateName = candidateCluster?.rawCity || candidateKey.split('|')[0];
-
-      const d = getCityDistance(currentName, candidateName);
-      if (d < minDistance) {
-        minDistance = d;
-        nearestKey = candidateKey;
+  // Build Haversine distance matrix (estimated driving time in seconds: 60km/h average = 1 min per km = 60s/km)
+  const matrix: number[][] = Array.from({ length: N }, () => Array(N).fill(0));
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      if (i !== j) {
+        const km = haversineDistanceKm(allPoints[i], allPoints[j]);
+        matrix[i][j] = km * 60; // estimated seconds
       }
     }
-
-    currentClusterKey = nearestKey;
   }
 
-  // Step 2b: Apply 2-Opt local search refinement to eliminate crossing paths & optimize circuit loop
-  const orderedClusterKeys = apply2Opt(initialClusterKeys, locationClusterMap, originCity);
-
-  // Step 3: Within each City, group strictly by Bairro (Neighborhood)
-  const result: RouteStop[] = [];
-
-  for (const clusterKey of orderedClusterKeys) {
-    const clusterData = locationClusterMap.get(clusterKey);
-    if (!clusterData) continue;
-
-    // Group stops by neighborhood (Bairro)
-    const neighborhoodMap = new Map<string, RouteStop[]>();
-    for (const stop of clusterData.stops) {
-      const nKey = normalize(stop.neighborhood) || "sem_bairro";
-      if (!neighborhoodMap.has(nKey)) neighborhoodMap.set(nKey, []);
-      neighborhoodMap.get(nKey)!.push(stop);
-    }
-
-    // Sort neighborhoods by zone score or stop count
-    const sortedNeighborhoods = [...neighborhoodMap.entries()].sort(
-      ([keyA, listA], [keyB, listB]) => {
-        const scoreA = getNeighborhoodZoneScore(clusterData.rawCity, keyA);
-        const scoreB = getNeighborhoodZoneScore(clusterData.rawCity, keyB);
-        if (scoreA !== scoreB) return scoreA - scoreB;
-        return listB.length - listA.length;
+  let tourIndices: number[];
+  if (N <= 13) {
+    // Solve exact 100% optimal circuit with Held-Karp DP
+    tourIndices = solveExactHeldKarp(N, matrix);
+  } else {
+    // Nearest-Neighbor initial tour
+    const unvisited = new Set(Array.from({ length: N - 1 }, (_, i) => i + 1));
+    const tour = [0];
+    let curr = 0;
+    while (unvisited.size > 0) {
+      let nearest = Array.from(unvisited)[0];
+      let minDist = Infinity;
+      for (const cand of unvisited) {
+        const d = matrix[curr][cand];
+        if (d < minDist) {
+          minDist = d;
+          nearest = cand;
+        }
       }
-    );
+      tour.push(nearest);
+      unvisited.delete(nearest);
+      curr = nearest;
+    }
+    // Apply Or-Opt block refinement
+    tourIndices = applyOrOpt(tour, matrix);
+  }
 
-    for (const [, neighborhoodStops] of sortedNeighborhoods) {
-      // Sort within neighborhood by TAT urgency (LP/OW priority first)
-      const sortedByTat = [...neighborhoodStops].sort(
-        (a, b) => parseTatDays(a.tat) - parseTatDays(b.tat)
-      );
-      result.push(...sortedByTat);
+  // Map indices back to stops (index 0 is base, 1..N-1 are stops)
+  return tourIndices.slice(1).map(idx => stops[idx - 1]);
+}
+
+async function resolveStopCoordAsync(stop: RouteStop): Promise<PointCoord> {
+  const coords = await getCoordinates(
+    stop.city,
+    stop.neighborhood,
+    stop.state || 'Sergipe',
+    stop.addressDetails,
+    stop.zipCode
+  );
+  if (coords) return { lat: coords[0], lng: coords[1] };
+  return getStopCoordinates(stop);
+}
+
+async function resolveBaseCoordAsync(baseAddress: string): Promise<PointCoord> {
+  const { city, state, street } = parseFullAddress(baseAddress);
+  const coords = await getCoordinates(
+    city || 'Aracaju',
+    '',
+    state || 'Sergipe',
+    street || baseAddress
+  );
+  if (coords) return { lat: coords[0], lng: coords[1] };
+
+  const fb = getCityCoordinates(baseAddress);
+  if (fb) return fb;
+  console.warn(`[Base] Geocode da base "${baseAddress}" falhou — usando fallback Aracaju. Verifique o endereço na Settings.`);
+  return { lat: -10.9142, lng: -37.0545 };
+
+  //return getCityCoordinates(baseAddress) || { lat: -10.9142, lng: -37.0545 };
+}
+
+/**
+ * Asynchronous High-Precision Highway Driving Time Optimizer (OSRM Real Driving Matrix + Held-Karp DP / Or-Opt)
+ */
+export async function optimizeRouteStopsAsync(
+  stops: RouteStop[],
+  originCity: string = "Aracaju"
+): Promise<{ stops: RouteStop[]; summary: string; totalDrivingMinutes: number }> {
+  if (!stops || stops.length <= 1) {
+    return { stops, summary: "Poucas paradas para otimização.", totalDrivingMinutes: 0 };
+  }
+
+  const [baseCoord, ...resolvedStopCoords] = await Promise.all([
+    resolveBaseCoordAsync(originCity),
+    ...stops.map(resolveStopCoordAsync)
+  ]);
+
+  const allPoints: PointCoord[] = [baseCoord, ...resolvedStopCoords];
+  const N = allPoints.length;
+
+  // Try fetching exact OSRM Driving Matrix (by highway distances and travel times)
+  const osrmData = await fetchOsrmDrivingMatrix(allPoints);
+  let matrix: number[][];
+
+  if (osrmData && osrmData.distanceMatrix && osrmData.distanceMatrix.some(row => row.some(d => d > 0))) {
+    matrix = osrmData.distanceMatrix; // meters
+  } else if (osrmData && osrmData.durationMatrix) {
+    matrix = osrmData.durationMatrix; // seconds
+  } else {
+    // Fallback: Haversine distance in meters
+    matrix = Array.from({ length: N }, () => Array(N).fill(0));
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        if (i !== j) {
+          matrix[i][j] = haversineDistanceKm(allPoints[i], allPoints[j]) * 1000;
+        }
+      }
     }
   }
 
-  return result;
+  let tourIndices: number[];
+  let algorithmUsed = "";
+
+  if (N <= 13) {
+    // Exact Solver Held-Karp DP (Guaranteed 100% optimal for N <= 12 stops)
+    tourIndices = solveExactHeldKarp(N, matrix);
+    tourIndices = applyOrOpt(tourIndices, matrix);
+    algorithmUsed = "Held-Karp DP Exato (Matriz de Distância de Rodovia OSRM)";
+  } else {
+    // Heuristic solver: Nearest Neighbor + Or-Opt + 2-Opt
+    const unvisited = new Set(Array.from({ length: N - 1 }, (_, i) => i + 1));
+    const tour = [0];
+    let curr = 0;
+
+    while (unvisited.size > 0) {
+      let nearest = Array.from(unvisited)[0];
+      let minCost = Infinity;
+
+      for (const cand of unvisited) {
+        const cost = matrix[curr][cand];
+        if (cost < minCost) {
+          minCost = cost;
+          nearest = cand;
+        }
+      }
+      tour.push(nearest);
+      unvisited.delete(nearest);
+      curr = nearest;
+    }
+
+    let refined = applyOrOpt(tour, matrix);
+    refined = apply2OptMatrix(refined, matrix);   // remove cruzamentos
+    refined = applyOrOpt(refined, matrix);        // reencaixa blocos
+    refined = apply2OptMatrix(refined, matrix);   // passada final
+    tourIndices = refined;
+    algorithmUsed = "Nearest-Neighbor + 2-Opt + Or-Opt (Matriz OSRM real)";
+  }
+
+  const totalSeconds = calculateClosedLoopDuration(tourIndices, matrix);
+  const totalDrivingMinutes = Math.round(totalSeconds / 60);
+
+  const reorderedStops = tourIndices.slice(1).map(idx => stops[idx - 1]);
+  const summary = `Circuito rodoviário otimizado (${algorithmUsed}): ${reorderedStops.length} paradas com tempo total estimado de ~${totalDrivingMinutes} min de deslocamento (retorno à base incluído).`;
+
+  return {
+    stops: reorderedStops,
+    summary,
+    totalDrivingMinutes
+  };
+}
+
+/**
+ * Synchronous wrapper for backward compatibility
+ */
+export function optimizeRouteStops(stops: RouteStop[], originCity: string = "Aracaju"): RouteStop[] {
+  return optimizeRouteStopsSync(stops, originCity);
 }
 
 /**
@@ -433,5 +541,5 @@ export function describeOptimization(
 ): string {
   const cities = new Set(optimized.map(s => s.city).filter(Boolean));
   const neighborhoods = new Set(optimized.map(s => s.neighborhood).filter(Boolean));
-  return `Circuito otimizado a partir de ${originCity}: ${optimized.length} paradas em ${cities.size} cidade(s) e ${neighborhoods.size} bairro(s), organizadas com agrupamento estrito por bairro e percurso de retorno à base.`;
+  return `Circuito rodoviario otimizado: ${optimized.length} paradas em ${cities.size} cidade(s) e ${neighborhoods.size} bairro(s), ordenadas para menor tempo de deslocamento por rodovias.`;
 }

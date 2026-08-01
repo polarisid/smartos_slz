@@ -52,7 +52,9 @@ const CITY_FALLBACK_COORDINATES: Record<string, [number, number]> = {
   "itabaianinha": [-11.2739, -37.7892],
   "itabi": [-10.1264, -37.1028],
   "itaporanga d'ajuda": [-10.9961, -37.3056],
-  "itaporanga": [-10.9961, -37.3056],
+  "itaporanga_se": [-10.9961, -37.3056],
+  "itaporanga_pb": [-7.3044, -38.1506],
+  "itaporanga": [-7.3044, -38.1506],
   "japaratuba": [-10.5939, -36.9381],
   "japoata": [-10.3508, -36.8008],
   "lagarto": [-10.9172, -37.6631],
@@ -187,6 +189,59 @@ export function parseFullAddress(address: string): { city: string; state: string
   return { city: 'Aracaju', state: 'SE', street: clean };
 }
 
+/**
+ * Validates whether a Brazilian CEP matches the provided city and state.
+ * Returns information about mismatch and suggestions.
+ */
+export async function validateCepWithCityState(zipCode: string, city: string, state: string): Promise<{
+  isValid: boolean;
+  mismatch: boolean;
+  details?: string;
+  suggestedCity?: string;
+  suggestedState?: string;
+}> {
+  if (!zipCode) return { isValid: true, mismatch: false };
+  const cleanZip = zipCode.replace(/\D/g, '').trim();
+  if (cleanZip.length !== 8) return { isValid: true, mismatch: false };
+
+  try {
+    const res = await fetch(`https://viacep.com.br/ws/${cleanZip}/json/`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && !data.erro) {
+        const cepCity = (data.localidade || '').trim();
+        const cepState = (data.uf || '').trim().toUpperCase();
+
+        const inputCityNorm = normalizeStr(city || '');
+        const rawInputState = (state || '').trim().toLowerCase();
+        // Resolve 2-letter code if input is full name like 'Sergipe' -> 'SE'
+        const inputStateCode = (rawInputState.length === 2
+          ? rawInputState.toUpperCase()
+          : (Object.entries(STATE_NAMES).find(([k, v]) => normalizeStr(v) === normalizeStr(rawInputState))?.[0] || rawInputState).toUpperCase()
+        );
+
+        const cepCityNorm = normalizeStr(cepCity);
+
+        // Check state mismatch or city mismatch
+        const stateMismatch = inputStateCode && cepState && inputStateCode !== cepState;
+        const cityMismatch = inputCityNorm && cepCityNorm && !inputCityNorm.includes(cepCityNorm) && !cepCityNorm.includes(inputCityNorm);
+
+        if (stateMismatch || cityMismatch) {
+          return {
+            isValid: false,
+            mismatch: true,
+            details: `O CEP ${zipCode} pertence a ${cepCity}-${cepState}, mas consta como ${city || 'sem cidade'}-${state || 'SE'}.`,
+            suggestedCity: cepCity,
+            suggestedState: cepState,
+          };
+        }
+      }
+    }
+  } catch (e) {}
+
+  return { isValid: true, mismatch: false };
+}
+
 function isValidStateCoords(coords: [number, number], state: string): boolean {
     if (!coords || !Array.isArray(coords) || coords.length !== 2) return false;
     const [lat, lng] = coords;
@@ -217,13 +272,59 @@ function normalizeStr(str: string): string {
         .trim();
 }
 
+function getHaversineDistance(c1: [number, number], c2: [number, number]): number {
+    const dLat = (c2[0] - c1[0]) * Math.PI / 180;
+    const dLng = (c2[1] - c1[1]) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(c1[0] * Math.PI / 180) * Math.cos(c2[0] * Math.PI / 180) *
+              Math.sin(dLng/2) * Math.sin(dLng/2);
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+export function getKnownCityCoords(cityNorm: string, state: string): [number, number] | undefined {
+    if (!cityNorm) return undefined;
+    const stCode = (state || 'SE').trim().toLowerCase();
+
+    // 1. Check state-scoped key first, e.g. "itaporanga_pb" or "itaporanga_se"
+    const stateScopedKey = `${cityNorm}_${stCode}`;
+    if (CITY_FALLBACK_COORDINATES[stateScopedKey]) {
+        return CITY_FALLBACK_COORDINATES[stateScopedKey];
+    }
+
+    // 2. Specific state collision overrides
+    if (cityNorm === 'itaporanga') {
+        if (stCode === 'pb' || stCode === 'paraiba') return [-7.3044, -38.1506];
+        if (stCode === 'se' || stCode === 'sergipe') return [-10.9961, -37.3056];
+    }
+
+    // 3. Fallback to general city key
+    return CITY_FALLBACK_COORDINATES[cityNorm] ||
+      Object.entries(CITY_FALLBACK_COORDINATES).find(([k]) => cityNorm.length >= 4 && (cityNorm.includes(k) || k.includes(cityNorm)))?.[1];
+}
+
+function isValidCityCoords(coords: [number, number], cityNorm: string, state: string): boolean {
+    if (!isValidStateCoords(coords, state)) return false;
+    if (!cityNorm) return true;
+
+    const knownCityCoords = getKnownCityCoords(cityNorm, state);
+    if (!knownCityCoords) return true;
+
+    const distKm = getHaversineDistance(coords, knownCityCoords);
+    if (distKm > 40) {
+        console.warn(`[City Bounds Guard] Coordinate [${coords[0]}, ${coords[1]}] is ${distKm.toFixed(1)} km away from city '${cityNorm}' (${state}) center. Rejecting wrong-city coordinate!`);
+        return false;
+    }
+
+    return true;
+}
+
 // Automatically purge legacy invalid geocode cache from browser localStorage on load
 if (typeof window !== 'undefined') {
     try {
         const keysToRemove: string[] = [];
         for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
-            if (k && k.includes('geocode_') && !k.startsWith('v3_geocode_')) {
+            if (k && k.includes('geocode_') && !k.startsWith('v8_geocode_')) {
                 keysToRemove.push(k);
             }
         }
@@ -231,120 +332,208 @@ if (typeof window !== 'undefined') {
     } catch (e) {}
 }
 
-export async function getCoordinates(city: string, neighborhood: string, state: string, addressDetails?: string): Promise<[number, number] | null> {
-    if (!city) return null;
+export async function getCoordinates(city: string, neighborhood: string, state: string, addressDetails?: string, zipCode?: string): Promise<[number, number] | null> {
+    if (!city && !zipCode) return null;
 
-    const safeCity = city.trim();
+    const safeCity = (city || '').trim();
     const cityNorm = normalizeStr(safeCity);
     const safeNeighborhood = neighborhood ? neighborhood.replace(/[^\w\s\u00C0-\u00FF]/gi, '').trim() : '';
+    const safeZip = zipCode ? zipCode.replace(/\D/g, '').trim() : '';
     
-    // Resolve 2-letter state codes to full state names (e.g. SE -> Sergipe, AL -> Alagoas)
-    const rawState = (state || 'SE').trim().toLowerCase();
+    // Resolve 2-letter state codes to full state names (e.g. SE -> Sergipe, AL -> Alagoas, PB -> Paraíba)
+    const rawStateInput = (state || 'SE').trim().toLowerCase();
+    const rawState = rawStateInput.length === 2 
+        ? rawStateInput 
+        : (Object.entries(STATE_NAMES).find(([k, v]) => normalizeStr(v) === normalizeStr(rawStateInput))?.[0] || rawStateInput);
     const fullState = STATE_NAMES[rawState] || state || 'Sergipe';
     const safeAddress = addressDetails ? addressDetails.replace(/[^\w\s\u00C0-\u00FF,]/gi, '').trim() : '';
 
-    const key = `v3_geocode_${safeAddress}_${safeNeighborhood}_${cityNorm}_${rawState}`.toLowerCase();
+    let usableZip = safeZip;
+    if (safeZip && safeZip.length === 8 && safeCity) {
+        try {
+            const val = await validateCepWithCityState(safeZip, safeCity, rawState);
+            if (val.mismatch) {
+                console.warn(`[Geocode Strategy] CEP ${safeZip} não pertence a ${safeCity}-${rawState} (pertence a ${val.suggestedCity}-${val.suggestedState}). Ignorando CEP e usando estritamente UF/Cidade/Bairro da planilha.`);
+                usableZip = '';
+            }
+        } catch (e) {}
+    }
+
+    const key = `v8_geocode_${usableZip}_${safeAddress}_${safeNeighborhood}_${cityNorm}_${rawState}`.toLowerCase();
     
-    // Check localStorage cache with strict state bounds validation
+    // Check localStorage cache with strict city bounds validation
     if (typeof window !== 'undefined') {
         const cached = localStorage.getItem(key);
         if (cached) {
             try {
                 const parsed = JSON.parse(cached);
-                if (isValidStateCoords(parsed, rawState)) {
+                if (isValidCityCoords(parsed, cityNorm, rawState)) {
                     return parsed;
                 } else {
-                    // Purge bad cached location (e.g. Paraguay or Paraná)
                     localStorage.removeItem(key);
                 }
             } catch(e) {}
         }
     }
 
-    // Attempt 0: Fast fallback to static city coordinates in Brazil for Sergipe / Northeast cities
-    const knownCoords = CITY_FALLBACK_COORDINATES[cityNorm] ||
-      Object.entries(CITY_FALLBACK_COORDINATES).find(([k]) => cityNorm.length >= 4 && (cityNorm.includes(k) || k.includes(cityNorm)))?.[1];
+    const knownCoords = getKnownCityCoords(cityNorm, rawState);
 
-    // If no address details provided, return fast fallback coordinates to avoid slow / inaccurate OSM queries
-    if (!safeAddress && knownCoords && isValidStateCoords(knownCoords, rawState)) {
-        const fastCoords: [number, number] = [
-            knownCoords[0] + (Math.random() - 0.5) * 0.008,
-            knownCoords[1] + (Math.random() - 0.5) * 0.008
-        ];
-        saveCache(key, fastCoords, rawState);
-        return fastCoords;
+    // Attempt 00: Google Geocoding API (High-Precision Rooftop/Street Geocoding for Brazil)
+    const googleApiKey = (typeof process !== 'undefined' && process.env)
+        ? (process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_GEOCODING_API_KEY || '')
+        : '';
+
+    if (googleApiKey) {
+        try {
+            const fullAddressQuery = [safeAddress, safeNeighborhood, safeCity, fullState, usableZip ? `CEP ${usableZip}` : '', 'Brasil']
+                .filter(Boolean)
+                .join(', ');
+            const googleUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(fullAddressQuery)}&components=country:BR&key=${googleApiKey}`;
+            const googleRes = await fetch(googleUrl);
+            if (googleRes.ok) {
+                const googleData = await googleRes.json();
+                if (googleData.status === 'OK' && googleData.results && googleData.results.length > 0) {
+                    const loc = googleData.results[0].geometry.location;
+                    const coords: [number, number] = [loc.lat, loc.lng];
+                    if (isValidCityCoords(coords, cityNorm, rawState)) {
+                        saveCache(key, coords, rawState);
+                        return coords;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("Google Geocoding API lookup failed, falling back to public providers", e);
+        }
     }
 
-    // Add API rate limiter
-    await delayQueue();
-
-    try {
-        // Attempt 1: Detailed address with countrycodes=br
-        if (safeAddress) {
-            const q0 = `${safeAddress}, ${safeNeighborhood ? safeNeighborhood + ', ' : ''}${safeCity}, ${fullState}, Brasil`;
-            const url0 = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=br&q=${encodeURIComponent(q0)}`;
-            const res0 = await fetch(url0);
-            if (res0.ok) {
-                const data0 = await res0.json();
-                if (data0 && data0.length > 0) {
-                    const coords: [number, number] = [parseFloat(data0[0].lat), parseFloat(data0[0].lon)];
-                    if (isValidStateCoords(coords, rawState)) {
+    // Attempt 0: High-accuracy Brazilian CEP Geocoding API (AwesomeAPI & BrasilAPI)
+    if (usableZip && usableZip.length === 8) {
+        try {
+            // 0a. Try AwesomeAPI CEP Geolocation (Returns exact lat/lng for Brazilian CEPs)
+            const awesomeRes = await fetch(`https://cep.awesomeapi.com.br/json/${usableZip}`);
+            if (awesomeRes.ok) {
+                const awesomeData = await awesomeRes.json();
+                if (awesomeData && awesomeData.lat && awesomeData.lng) {
+                    const coords: [number, number] = [parseFloat(awesomeData.lat), parseFloat(awesomeData.lng)];
+                    if (isValidCityCoords(coords, cityNorm, rawState)) {
                         saveCache(key, coords, rawState);
                         return coords;
                     }
                 }
             }
-            await delayQueue();
-        }
+        } catch (e) {}
 
-        // Attempt 2: Neighborhood + City + Full State + Brazil
-        if (safeNeighborhood) {
-            const q1 = `${safeNeighborhood}, ${safeCity}, ${fullState}, Brasil`;
-            const url1 = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=br&q=${encodeURIComponent(q1)}`;
-            const res1 = await fetch(url1);
-            if (res1.ok) {
-                const data1 = await res1.json();
-                if (data1 && data1.length > 0) {
-                    const coords: [number, number] = [parseFloat(data1[0].lat), parseFloat(data1[0].lon)];
-                    if (isValidStateCoords(coords, rawState)) {
-                        saveCache(key, coords, rawState);
-                        return coords;
+        try {
+            // 0b. Try BrasilAPI CEP V2 (Returns exact coordinates from IBGE/Correios)
+            const brasilApiRes = await fetch(`https://brasilapi.com.br/api/cep/v2/${usableZip}`);
+            if (brasilApiRes.ok) {
+                const bData = await brasilApiRes.json();
+                if (bData && bData.location && bData.location.coordinates) {
+                    const { longitude, latitude } = bData.location.coordinates;
+                    if (latitude && longitude) {
+                        const coords: [number, number] = [parseFloat(latitude), parseFloat(longitude)];
+                        if (isValidCityCoords(coords, cityNorm, rawState)) {
+                            saveCache(key, coords, rawState);
+                            return coords;
+                        }
                     }
                 }
             }
-            await delayQueue();
+        } catch (e) {}
+
+        try {
+            // 0c. ViaCEP lookup + Nominatim/Photon exact street search
+            const viaCepRes = await fetch(`https://viacep.com.br/ws/${usableZip}/json/`);
+            if (viaCepRes.ok) {
+                const viaCepData = await viaCepRes.json();
+                if (viaCepData && !viaCepData.erro) {
+                    const streetFromCep = viaCepData.logradouro || safeAddress;
+                    const neighborhoodFromCep = viaCepData.bairro || safeNeighborhood;
+                    const cityFromCep = viaCepData.localidade || safeCity;
+                    const stateFromCep = viaCepData.uf || rawState;
+
+                    // Search Nominatim with street + neighborhood
+                    if (streetFromCep) {
+                        const qViaCep = `${streetFromCep}, ${neighborhoodFromCep ? neighborhoodFromCep + ', ' : ''}${cityFromCep}, ${stateFromCep}, Brasil`;
+                        const urlViaCep = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=br&q=${encodeURIComponent(qViaCep)}`;
+                        const resViaCep = await fetch(urlViaCep);
+                        if (resViaCep.ok) {
+                            const dataViaCep = await resViaCep.json();
+                            if (dataViaCep && dataViaCep.length > 0) {
+                                const coords: [number, number] = [parseFloat(dataViaCep[0].lat), parseFloat(dataViaCep[0].lon)];
+                                if (isValidCityCoords(coords, cityNorm, stateFromCep)) {
+                                    saveCache(key, coords, rawState);
+                                    return coords;
+                                }
+                            }
+                        }
+                    }
+
+                    // Search Photon Komoot
+                    const qPhoton = `${streetFromCep ? streetFromCep + ' ' : ''}${neighborhoodFromCep ? neighborhoodFromCep + ' ' : ''}${cityFromCep} ${stateFromCep}`;
+                    const urlPhoton = `https://photon.komoot.io/api/?q=${encodeURIComponent(qPhoton)}&limit=1&lang=default`;
+                    const resPhoton = await fetch(urlPhoton);
+                    if (resPhoton.ok) {
+                        const dataPhoton = await resPhoton.json();
+                        if (dataPhoton && dataPhoton.features && dataPhoton.features.length > 0) {
+                            const [lng, lat] = dataPhoton.features[0].geometry.coordinates;
+                            const coords: [number, number] = [lat, lng];
+                            if (isValidCityCoords(coords, cityNorm, stateFromCep)) {
+                                saveCache(key, coords, rawState);
+                                return coords;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("ViaCEP/Photon lookup error", e);
         }
 
-        // Attempt 3: City + Full State + Brazil
-        const q2 = `${safeCity}, ${fullState}, Brasil`;
-        const url2 = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=br&q=${encodeURIComponent(q2)}`;
-        const res2 = await fetch(url2);
-        
-        if (res2.ok) {
-            const data2 = await res2.json();
-            if (data2 && data2.length > 0) {
-                const coords: [number, number] = [parseFloat(data2[0].lat), parseFloat(data2[0].lon)];
-                if (isValidStateCoords(coords, rawState)) {
-                    coords[0] += (Math.random() - 0.5) * 0.008;
-                    coords[1] += (Math.random() - 0.5) * 0.008;
+        // Direct CEP query in Nominatim
+        const formattedCep = `${usableZip.slice(0, 5)}-${usableZip.slice(5)}`;
+        const qCep = `${formattedCep}, ${safeCity || 'Brasil'}`;
+        const urlCep = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=br&q=${encodeURIComponent(qCep)}`;
+        const resCep = await fetch(urlCep);
+        if (resCep.ok) {
+            const dataCep = await resCep.json();
+            if (dataCep && dataCep.length > 0) {
+                const coords: [number, number] = [parseFloat(dataCep[0].lat), parseFloat(dataCep[0].lon)];
+                if (isValidCityCoords(coords, cityNorm, rawState)) {
                     saveCache(key, coords, rawState);
                     return coords;
                 }
             }
         }
-
-    } catch (err) {
-        console.error("Geocoding failed", err);
+        await delayQueue();
     }
 
-    // Step 4: Fallback to static city coordinates in Brazil
+    try {
+        // Attempt 1: Street / Neighborhood search via Photon Komoot (CORS-Friendly, No 429 Rate-Limits)
+        if (safeAddress || safeNeighborhood) {
+            const queryTerms = [safeAddress, safeNeighborhood, safeCity, fullState, 'Brasil'].filter(Boolean).join(', ');
+            const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryTerms)}&limit=1&lang=default`;
+            const resPhoton = await fetch(photonUrl);
+            if (resPhoton.ok) {
+                const dataPhoton = await resPhoton.json();
+                if (dataPhoton && dataPhoton.features && dataPhoton.features.length > 0) {
+                    const [lng, lat] = dataPhoton.features[0].geometry.coordinates;
+                    const coords: [number, number] = [lat, lng];
+                    if (isValidCityCoords(coords, cityNorm, rawState)) {
+                        saveCache(key, coords, rawState);
+                        return coords;
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.warn("Photon lookup skipped", err);
+    }
+
+    // Step 2: Instant Fallback to verified local city coordinates (0 ms, 0 network, 0 CORS, 0 429 rate limits!)
     if (knownCoords) {
-        const fallbackCoords: [number, number] = [
-            knownCoords[0] + (Math.random() - 0.5) * 0.008,
-            knownCoords[1] + (Math.random() - 0.5) * 0.008
-        ];
-        saveCache(key, fallbackCoords, rawState);
-        return fallbackCoords;
+        saveCache(key, knownCoords, rawState);
+        return knownCoords;
     }
 
     return null;
