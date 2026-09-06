@@ -18,7 +18,7 @@ import { Phone, MessageSquare, ChevronRight } from "lucide-react";import {
 } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { PlusCircle, Save, Trash2, Eye, CheckCircle, ChevronDown, Calendar as CalendarIcon, Edit, Users, Truck, Package, PackageOpen, Copy, ArrowUp, ArrowDown, FileDown, Loader2, ArrowRightLeft, MapPin } from "lucide-react";
+import { PlusCircle, Save, Trash2, Eye, CheckCircle, ChevronDown, Calendar as CalendarIcon, Edit, Users, Truck, Package, PackageOpen, Copy, ArrowUp, ArrowDown, ArrowUpDown, FileDown, Loader2, ArrowRightLeft, MapPin, Zap, Rocket, Columns2 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { routeService } from "@/services/supabase/routeService";
@@ -27,7 +27,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useTechnicians, useServiceOrders } from "@/hooks/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import { type Route, type RouteStop, type ServiceOrder, type Technician, type RoutePart, type Driver } from "@/lib/data";
-import { validateCepWithCityState } from "@/lib/geocode";
+import { tagStopsWithZipMismatch } from "@/lib/geocode";
+import { optimizeRouteStopsAsync } from "@/lib/routeOptimizer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +43,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import React from "react";
 import { Progress } from "@/components/ui/progress";
 import { triggerWebhook } from "@/lib/webhook";
+import { RouteCreationWizard } from "@/components/routes/RouteCreationWizard";
 import * as XLSX from 'xlsx';
 import dynamic from "next/dynamic";
 import { Clock, Map as MapIcon, List, History } from "lucide-react";
@@ -276,6 +278,7 @@ function RouteForm({
     const [technicianId, setTechnicianId] = useState<string | undefined>();
     const [driverId, setDriverId] = useState<string | undefined>("none");
     const [parsedStops, setParsedStops] = useState<RouteStop[]>([]);
+    const [previewViewTab, setPreviewViewTab] = useState<'list' | 'map' | 'split'>('list');
 
     const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set());
     const toggleExpand = (so: string) => {
@@ -300,6 +303,21 @@ function RouteForm({
         setDragOverIndex(null);
     };
 
+    // Paradas da pré-visualização (parsedStops, ainda sendo editadas) no
+    // formato que o RouteMap espera - status fica sempre "todo" aqui, já que
+    // isso é só um preview geográfico da edição atual, não o status real da OS.
+    const previewMapStops = useMemo(() => {
+        const previewRoute = {
+            id: initialData?.id || 'draft',
+            name: routeName || 'Nova Rota',
+            technicianName: technicians.find(t => t.id === technicianId)?.name,
+            stops: parsedStops,
+            createdAt: initialData?.createdAt || new Date(),
+            isActive: true,
+        } as Route;
+        return parsedStops.map(stop => ({ stop, route: previewRoute, status: 'todo' as const }));
+    }, [parsedStops, routeName, technicianId, technicians, initialData]);
+
     const [manualStopData, setManualStopData] = useState({
         serviceOrder: '',
         ascJobNumber: '',
@@ -314,6 +332,9 @@ function RouteForm({
         addressDetails: '',
     });
     const [manualPartsText, setManualPartsText] = useState("");
+    const [manualAddOpen, setManualAddOpen] = useState(false);
+    const [appendText, setAppendText] = useState("");
+    const [isOptimizing, setIsOptimizing] = useState(false);
 
     const routeDataModel = "SO Nro.\tASC Job No.\tNome Consumidor\tCidade\tBairro\tUF\tCEP\tModelo\tTURNO\tTAT\tData de Solicitação\t1st Visit Date\tTS\tOW/LP\tSPD\tStatus comment\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD\tCOD\tDESCRICAO\tQTD";
 
@@ -335,7 +356,9 @@ function RouteForm({
                 setLicensePlate(initialData.licensePlate || "");
                 setTechnicianId(initialData.technicianId || "");
                 setDriverId(initialData.driverId || "none");
-                setParsedStops(initialData.stops.map(s => ({ ...s, stopType: s.stopType || 'padrao' })));
+                const initialStops = initialData.stops.map(s => ({ ...s, stopType: s.stopType || 'padrao' }));
+                setParsedStops(initialStops);
+                tagStopsWithZipMismatch(initialStops).then(setParsedStops).catch(console.error);
                 const initialText = reconstructRouteText(initialData.stops);
                 setRouteText(initialText);
             } else {
@@ -363,27 +386,77 @@ function RouteForm({
             return {
                 ...newStop,
                 stopType: existingStop?.stopType || 'padrao',
-                addressDetails: existingStop?.addressDetails
+                addressDetails: existingStop?.addressDetails ?? newStop.addressDetails,
+                collectionType: existingStop?.collectionType ?? newStop.collectionType,
+                turn: newStop.turn || existingStop?.turn || '',
+                // Preserva confirmações manuais (não vêm da planilha).
+                confirmedByCall: existingStop?.confirmedByCall,
+                confirmedByMessage: existingStop?.confirmedByMessage,
+                messageStatus: existingStop?.messageStatus,
             };
         });
         setParsedStops(updatedStops);
-
-        const validatedStops = await Promise.all(updatedStops.map(async (stop) => {
-            if (stop.zipCode) {
-                const val = await validateCepWithCityState(stop.zipCode, stop.city, stop.state);
-                if (val.mismatch) {
-                    return {
-                        ...stop,
-                        zipMismatch: true,
-                        zipMismatchDetails: val.details,
-                        suggestedCityState: `${val.suggestedCity}-${val.suggestedState}`
-                    };
-                }
-            }
-            return stop;
-        }));
-        setParsedStops(validatedStops);
+        setParsedStops(await tagStopsWithZipMismatch(updatedStops));
     };
+
+    // Adiciona novas paradas coladas SEM tocar nas existentes (mantém confirmações).
+    const handleAppendPastedStops = async () => {
+        const parsed = parseRouteText(appendText);
+        if (parsed.length === 0) {
+            toast({ variant: "destructive", title: "Nada para adicionar", description: "Cole os dados no mesmo formato da planilha." });
+            return;
+        }
+        const existingOs = new Set(parsedStops.map(s => s.serviceOrder));
+        const additions = parsed
+            .filter(p => p.serviceOrder && !existingOs.has(p.serviceOrder))
+            .map(p => ({ ...p, stopType: p.stopType || 'padrao' as const }));
+        if (additions.length === 0) {
+            toast({ title: "Nenhuma parada nova", description: "Todas as OS coladas já estão na rota." });
+            return;
+        }
+        const merged = [...parsedStops, ...additions];
+        const tagged = await tagStopsWithZipMismatch(merged);
+        setParsedStops(tagged);
+        setRouteText(reconstructRouteText(tagged)); // mantém o texto principal em sincronia
+        setAppendText("");
+        toast({ title: `${additions.length} parada(s) adicionada(s)`, description: "Revise e clique em Salvar Rota." });
+    };
+
+    // Otimiza a ordem das paradas pela distância real (OSRM), preservando os
+    // objetos das paradas — portanto mantém confirmações, turnos, etc.
+    const handleOptimizeRoute = async () => {
+        if (parsedStops.length <= 1) return;
+        setIsOptimizing(true);
+        try {
+            // Origem = base (Aracaju), de onde o técnico sai.
+            const result = await optimizeRouteStopsAsync(parsedStops, 'Aracaju');
+            setParsedStops(result.stops);
+            setRouteText(reconstructRouteText(result.stops));
+            toast({ title: "Rota otimizada", description: result.summary });
+        } catch (e) {
+            console.error("Falha ao otimizar rota:", e);
+            toast({ variant: "destructive", title: "Não foi possível otimizar", description: "Tente novamente em instantes." });
+        } finally {
+            setIsOptimizing(false);
+        }
+    };
+
+    // Inverte o sentido da rota (última vira primeira).
+    const handleInvertRoute = () => {
+        if (parsedStops.length <= 1) return;
+        const reversed = [...parsedStops].reverse();
+        setParsedStops(reversed);
+        setRouteText(reconstructRouteText(reversed));
+    };
+
+    // Preview ao vivo do texto colado: separa o que é novo do que já está na rota.
+    const appendPreview = useMemo(() => {
+        const parsed = appendText.trim() ? parseRouteText(appendText) : [];
+        const existing = new Set(parsedStops.map(s => s.serviceOrder));
+        const news = parsed.filter(p => p.serviceOrder && !existing.has(p.serviceOrder));
+        const dups = parsed.filter(p => p.serviceOrder && existing.has(p.serviceOrder));
+        return { parsed, news, dups };
+    }, [appendText, parsedStops]);
 
     const handleStopTypeChange = (index: number, type: 'padrao' | 'coleta' | 'entrega') => {
         setParsedStops(currentStops => {
@@ -703,6 +776,19 @@ function RouteForm({
         }
     };
 
+    // Aplica uma alteração nas paradas e, em rota já existente (edição),
+    // persiste na hora — sem precisar clicar em "Salvar Rota".
+    const applyStopChange = (updater: (stops: RouteStop[]) => RouteStop[]) => {
+        const next = updater(parsedStops);
+        setParsedStops(next);
+        if (mode === 'edit' && initialData?.id && initialData.id !== 'draft') {
+            routeService.update(initialData.id, { stops: next }).catch((e) => {
+                console.error("Auto-save de confirmação falhou:", e);
+                toast({ variant: "destructive", title: "Não salvou", description: "Falha ao salvar a confirmação. Clique novamente." });
+            });
+        }
+    };
+
     return (
         <>
         <Card>
@@ -836,14 +922,76 @@ function RouteForm({
                 </div>
 
                 <div className="space-y-2 pt-6 border-t">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
                         <Label className="text-base">Pré-visualização da Rota</Label>
-                        <span className="text-xs text-muted-foreground">{parsedStops.length} parada(s)</span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {parsedStops.length > 1 && (
+                                <>
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={handleOptimizeRoute}
+                                        disabled={isOptimizing}
+                                        className="h-8 gap-1.5"
+                                        title="Reorganizar as paradas pela menor distância (mapa)"
+                                    >
+                                        {isOptimizing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />}
+                                        {isOptimizing ? "Otimizando…" : "Otimizar rota"}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={handleInvertRoute}
+                                        disabled={isOptimizing}
+                                        className="h-8 gap-1.5"
+                                        title="Inverter o sentido da rota"
+                                    >
+                                        <ArrowUpDown className="h-3.5 w-3.5" /> Inverter
+                                    </Button>
+                                </>
+                            )}
+                            <div className="flex items-center gap-1 rounded-lg border p-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setPreviewViewTab('list')}
+                                    className={cn("flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors", previewViewTab === 'list' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                                >
+                                    <List className="h-3.5 w-3.5" /> Lista
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPreviewViewTab('map')}
+                                    className={cn("flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors", previewViewTab === 'map' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                                >
+                                    <MapIcon className="h-3.5 w-3.5" /> Mapa
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPreviewViewTab('split')}
+                                    className={cn("hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors", previewViewTab === 'split' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                                    title="Reordenar a lista vendo o mapa ao lado"
+                                >
+                                    <Columns2 className="h-3.5 w-3.5" /> Lista + Mapa
+                                </button>
+                            </div>
+                            <span className="text-xs text-muted-foreground">{parsedStops.length} parada(s)</span>
+                        </div>
                     </div>
 
+                    <div className={cn(previewViewTab === 'split' && "grid grid-cols-1 lg:grid-cols-2 gap-3 items-start")}>
+                    {previewViewTab !== 'map' && (
                     <div className="border rounded-lg p-1.5 space-y-1.5">
                         {parsedStops.length > 0 ? parsedStops.map((stop, index) => {
-                            const isAlreadyVisited = serviceOrders.some(os => os.serviceOrderNumber === stop.serviceOrder);
+                            const matchingOs = serviceOrders
+                                .filter(os => os.serviceOrderNumber === stop.serviceOrder)
+                                .sort((a, b) => a.date.getTime() - b.date.getTime());
+                            const lastVisitOs = matchingOs.length > 0 ? matchingOs[matchingOs.length - 1] : null;
+                            const isAlreadyVisited = lastVisitOs != null;
+                            // Já coletada/atendida = existe OS finalizada para esta parada.
+                            // Nesse caso não deixamos excluir da rota (perderia o registro).
+                            const alreadyCollected = matchingOs.some(os => os.isFinalized !== false);
                             const isExpanded = expandedStops.has(stop.serviceOrder);
                             const partsCount = stop.parts?.length || 0;
                             const location = [stop.city, stop.neighborhood].filter(Boolean).join(' · ');
@@ -876,13 +1024,16 @@ function RouteForm({
                                     ? "border-l-emerald-500"
                                     : "border-l-blue-500";
 
+                            const messageConfirmed = (stop.messageStatus ?? (stop.confirmedByMessage ? 'confirmed' : 'none')) === 'confirmed';
+
                             return (
                                 <div
                                     key={stop.serviceOrder}
                                     onDragOver={(e) => { e.preventDefault(); if (dragOverIndex !== index) setDragOverIndex(index); }}
                                     onDrop={(e) => { e.preventDefault(); handleReorder(index); }}
                                     className={cn(
-                                        "bg-card border border-l-[3px] rounded-r-lg rounded-l-none transition-shadow",
+                                        "border border-l-[3px] rounded-r-lg rounded-l-none transition-shadow",
+                                        messageConfirmed ? "bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900" : "bg-card",
                                         borderClass,
                                         dragIndex === index && "opacity-40",
                                         dragOverIndex === index && dragIndex !== index && "ring-2 ring-blue-400 ring-offset-1"
@@ -909,16 +1060,78 @@ function RouteForm({
                                         </button>
 
                                         <div className="flex flex-col min-w-[140px]">
-                                            <span className="font-mono text-[13px] font-medium">{stop.serviceOrder}</span>
+                                            <span className="flex items-center gap-1.5">
+                                                <span className="font-mono text-[13px] font-medium">{stop.serviceOrder}</span>
+                                                {stop.warrantyType && (
+                                                    <span className={`text-[9px] font-bold px-1 rounded shrink-0 ${stop.warrantyType === 'LP' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'}`}>
+                                                        {stop.warrantyType}
+                                                    </span>
+                                                )}
+                                            </span>
                                             <span className="text-[11px] text-muted-foreground truncate max-w-[180px]" title={location}>
                                                 {location || 'Sem localização'}
                                             </span>
                                         </div>
 
-                                        {isAlreadyVisited && (
-                                            <Badge variant="secondary" className="bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300 hover:bg-violet-100 text-[10px] px-1.5 py-0 flex items-center gap-0.5 shrink-0 whitespace-nowrap">
-                                                <History className="w-3 h-3" /> Visitada
-                                            </Badge>
+                                        {isAlreadyVisited && lastVisitOs && (
+                                            <Popover>
+                                                <PopoverTrigger asChild>
+                                                    <button
+                                                        type="button"
+                                                        title="Ver observações da última visita"
+                                                        className="shrink-0 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+                                                    >
+                                                        <Badge variant="secondary" className="cursor-pointer bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300 hover:bg-violet-200 dark:hover:bg-violet-900/50 text-[10px] px-1.5 py-0 flex items-center gap-0.5 whitespace-nowrap transition-colors">
+                                                            <History className="w-3 h-3" /> Visitada
+                                                        </Badge>
+                                                    </button>
+                                                </PopoverTrigger>
+                                                <PopoverContent align="start" className="w-80 p-0 overflow-hidden">
+                                                    <div className="bg-violet-50 dark:bg-violet-950/40 px-4 py-2.5 border-b flex items-center justify-between gap-2">
+                                                        <div className="flex items-center gap-1.5 text-violet-700 dark:text-violet-300 font-semibold text-sm">
+                                                            <History className="w-4 h-4" /> Última visita
+                                                        </div>
+                                                        <span className="text-[11px] font-medium text-muted-foreground">{format(lastVisitOs.date, "dd/MM/yyyy")}</span>
+                                                    </div>
+                                                    <div className="p-4 space-y-2.5 text-sm">
+                                                        <div className="flex justify-between gap-2">
+                                                            <span className="text-muted-foreground">Técnico</span>
+                                                            <span className="font-medium text-right">{technicians.find(t => t.id === lastVisitOs.technicianId)?.name || "—"}</span>
+                                                        </div>
+                                                        {!lastVisitOs.isFinalized && lastVisitOs.pendingReason && (
+                                                            <div className="rounded-md border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30 px-2.5 py-1.5">
+                                                                <p className="text-[10px] font-bold uppercase tracking-wide text-amber-700 dark:text-amber-400">⚠️ Atendimento não finalizado</p>
+                                                                <p className="text-xs text-amber-800 dark:text-amber-300 mt-0.5">{lastVisitOs.pendingReason}</p>
+                                                            </div>
+                                                        )}
+                                                        {lastVisitOs.defectFound && (
+                                                            <div>
+                                                                <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Defeito constatado</p>
+                                                                <p className="text-xs whitespace-pre-wrap">{lastVisitOs.defectFound}</p>
+                                                            </div>
+                                                        )}
+                                                        {lastVisitOs.replacedPart && (
+                                                            <div>
+                                                                <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Peça trocada</p>
+                                                                <p className="text-xs font-mono whitespace-pre-wrap">{lastVisitOs.replacedPart}</p>
+                                                            </div>
+                                                        )}
+                                                        {lastVisitOs.observations ? (
+                                                            <div>
+                                                                <p className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Observações</p>
+                                                                <p className="text-xs whitespace-pre-wrap">{lastVisitOs.observations}</p>
+                                                            </div>
+                                                        ) : (
+                                                            (!lastVisitOs.defectFound && !lastVisitOs.replacedPart && !(lastVisitOs.pendingReason && !lastVisitOs.isFinalized)) && (
+                                                                <p className="text-xs text-muted-foreground italic">Sem observações registradas nesta visita.</p>
+                                                            )
+                                                        )}
+                                                        {matchingOs.length > 1 && (
+                                                            <p className="text-[10px] text-muted-foreground pt-1 border-t">{matchingOs.length} atendimentos nesta OS — exibindo o mais recente.</p>
+                                                        )}
+                                                    </div>
+                                                </PopoverContent>
+                                            </Popover>
                                         )}
                                         {stop.zipMismatch && (
                                             <span className="text-red-500 shrink-0" title={`CEP (${stop.zipCode}) de ${stop.suggestedCityState} — Em ${stop.city}`}>⚠️</span>
@@ -983,7 +1196,7 @@ function RouteForm({
                                             type="button"
                                             variant="ghost"
                                             size="icon"
-                                            onClick={() => setParsedStops(cs => cs.map((s, i) => i === index ? { ...s, confirmedByCall: !s.confirmedByCall } : s))}                                            className={cn(
+                                            onClick={() => applyStopChange(cs => cs.map((s, i) => i === index ? { ...s, confirmedByCall: !s.confirmedByCall } : s))}                                            className={cn(
                                                 "h-7 w-7 shrink-0 border transition-all",
                                                 stop.confirmedByCall
                                                     ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 hover:text-white"
@@ -993,21 +1206,44 @@ function RouteForm({
                                         >
                                             <Phone className="h-3.5 w-3.5" />
                                         </Button>
-                                        <Button
-                                            type="button"
-                                            variant="ghost"
-                                            size="icon"
-                                            onClick={() => setParsedStops(cs => cs.map((s, i) => i === index ? { ...s, confirmedByMessage: !s.confirmedByMessage } : s))}
-                                            className={cn(
-                                                "h-7 w-7 shrink-0 border transition-all",
-                                                stop.confirmedByMessage
-                                                    ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700 hover:text-white"
-                                                    : "text-muted-foreground border-border/40 hover:bg-muted"
-                                            )}
-                                            title="Confirmação por Mensagem / WhatsApp"
-                                        >
-                                            <MessageSquare className="h-3.5 w-3.5" />
-                                        </Button>
+                                        {(() => {
+                                            // Estado efetivo (compatível com dados antigos só com confirmedByMessage)
+                                            const msgStatus: 'none' | 'sent' | 'confirmed' =
+                                                stop.messageStatus ?? (stop.confirmedByMessage ? 'confirmed' : 'none');
+                                            const cycleMessage = () => applyStopChange(cs => cs.map((s, i) => {
+                                                if (i !== index) return s;
+                                                const cur: 'none' | 'sent' | 'confirmed' = s.messageStatus ?? (s.confirmedByMessage ? 'confirmed' : 'none');
+                                                const next = cur === 'none' ? 'sent' : cur === 'sent' ? 'confirmed' : 'none';
+                                                return {
+                                                    ...s,
+                                                    messageStatus: next === 'none' ? undefined : next,
+                                                    confirmedByMessage: next === 'confirmed',
+                                                };
+                                            }));
+                                            return (
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    onClick={cycleMessage}
+                                                    className={cn(
+                                                        "h-7 w-7 shrink-0 border transition-all",
+                                                        msgStatus === 'confirmed'
+                                                            ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 hover:text-white"
+                                                            : msgStatus === 'sent'
+                                                                ? "bg-amber-500 text-white border-amber-500 hover:bg-amber-600 hover:text-white"
+                                                                : "text-muted-foreground border-border/40 hover:bg-muted"
+                                                    )}
+                                                    title={
+                                                        msgStatus === 'confirmed' ? "Mensagem confirmada (clique para limpar)"
+                                                        : msgStatus === 'sent' ? "Mensagem enviada (clique para confirmar)"
+                                                        : "Confirmação por Mensagem / WhatsApp (clique para marcar como enviada)"
+                                                    }
+                                                >
+                                                    <MessageSquare className="h-3.5 w-3.5" />
+                                                </Button>
+                                            );
+                                        })()}
 
                                         <span className="w-px h-5 bg-border shrink-0 hidden lg:block" />
 
@@ -1023,8 +1259,25 @@ function RouteForm({
                                                     <ArrowRightLeft className="h-4 w-4 text-blue-500" />
                                                 </Button>
                                             )}
-                                            <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleRemoveStop(index)} title="Remover">
-                                                <Trash2 className="h-4 w-4 text-destructive" />
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7"
+                                                onClick={() => {
+                                                    if (alreadyCollected) {
+                                                        toast({
+                                                            variant: "destructive",
+                                                            title: "Não é possível remover",
+                                                            description: "Esta parada já foi coletada/atendida e não pode ser excluída da rota.",
+                                                        });
+                                                        return;
+                                                    }
+                                                    handleRemoveStop(index);
+                                                }}
+                                                title={alreadyCollected ? "Já coletada — não pode ser removida" : "Remover"}
+                                            >
+                                                <Trash2 className={cn("h-4 w-4", alreadyCollected ? "text-muted-foreground/40" : "text-destructive")} />
                                             </Button>
                                         </div>
                                     </div>
@@ -1042,17 +1295,9 @@ function RouteForm({
                                                     <span className="text-[10px] text-muted-foreground block">Cliente</span>
                                                     <span className="font-medium">{stop.consumerName || '—'}</span>
                                                 </div>
-                                                <div>
-                                                    <span className="text-[10px] text-muted-foreground block">Cidade</span>
-                                                    <span>{stop.city || '—'}</span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-[10px] text-muted-foreground block">Bairro</span>
-                                                    <span>{stop.neighborhood || '—'}</span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-[10px] text-muted-foreground block">CEP</span>
-                                                    <span className="font-mono">{stop.zipCode || '—'}</span>
+                                                <div className="col-span-2 md:col-span-1">
+                                                    <span className="text-[10px] text-muted-foreground block">Modelo</span>
+                                                    <span className="font-mono break-words">{stop.model || '—'}</span>
                                                 </div>
                                             </div>
 
@@ -1110,10 +1355,32 @@ function RouteForm({
                             </div>
                         )}
                     </div>
+                    )}
+                    {previewViewTab !== 'list' && (
+                        <div className={cn("rounded-lg border overflow-hidden h-[500px]", previewViewTab === 'split' && "lg:sticky lg:top-4")}>
+                            {parsedStops.length > 0 ? (
+                                <DynamicalRouteMap routes={[]} activeStops={previewMapStops} />
+                            ) : (
+                                <div className="h-full flex items-center justify-center text-center text-sm text-muted-foreground">
+                                    A pré-visualização aparecerá aqui.
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    </div>
                 </div>
 
                 <div className="space-y-4 border-t pt-6">
-                    <Label className="font-semibold text-base">Adicionar Parada Manualmente</Label>
+                    <button
+                        type="button"
+                        onClick={() => setManualAddOpen(o => !o)}
+                        className="flex items-center gap-2 font-semibold text-base hover:opacity-80 transition-opacity"
+                        aria-expanded={manualAddOpen}
+                    >
+                        {manualAddOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        Adicionar Parada Manualmente
+                    </button>
+                    {manualAddOpen && (<div className="space-y-4">
                     <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
                         <div className="space-y-1">
                             <Label htmlFor="manual-serviceOrder" className="text-xs">Nº da OS *</Label>
@@ -1181,6 +1448,71 @@ function RouteForm({
                         </div>
                     </div>
                     <Button type="button" onClick={handleAddManualStop} className="w-full sm:w-auto">Adicionar Parada à Rota</Button>
+                    </div>)}
+                </div>
+
+                <div className="space-y-3 border-t pt-6">
+                    <Label className="font-semibold text-base">Colar mais paradas (mesmo formato da planilha)</Label>
+                    <p className="text-xs text-muted-foreground">
+                        Cole aqui apenas as novas linhas da planilha. As paradas já existentes e suas confirmações (📞 / 💬) são mantidas — nada é sobrescrito.
+                    </p>
+                    <Textarea
+                        value={appendText}
+                        onChange={(e) => setAppendText(e.target.value)}
+                        placeholder="Cole aqui as linhas da planilha das novas paradas..."
+                        className="min-h-[90px] font-mono text-xs"
+                    />
+
+                    {appendText.trim() && (
+                        <div className="rounded-md border bg-muted/30 p-2.5 space-y-2">
+                            {appendPreview.parsed.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">Nenhuma parada reconhecida no texto colado. Confira se está no mesmo formato da planilha.</p>
+                            ) : (
+                                <>
+                                    <p className="text-xs font-medium">
+                                        <span className="text-emerald-600 dark:text-emerald-400">{appendPreview.news.length} nova(s)</span>
+                                        {appendPreview.dups.length > 0 && (
+                                            <span className="text-muted-foreground"> · {appendPreview.dups.length} já na rota (ignorada(s))</span>
+                                        )}
+                                    </p>
+                                    <div className="space-y-1 max-h-44 overflow-y-auto">
+                                        {appendPreview.news.map((s, i) => (
+                                            <div key={`n-${i}`} className="flex items-center gap-2 text-xs">
+                                                <span className="font-mono font-medium shrink-0">{s.serviceOrder}</span>
+                                                {s.warrantyType && (
+                                                    <span className={cn(
+                                                        "text-[9px] font-bold px-1 rounded shrink-0",
+                                                        s.warrantyType === 'LP' ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                                                    )}>{s.warrantyType}</span>
+                                                )}
+                                                <span className="text-muted-foreground truncate">{[s.consumerName, s.city].filter(Boolean).join(' · ') || '—'}</span>
+                                                {s.model && <span className="font-mono text-[10px] text-muted-foreground truncate hidden sm:inline">{s.model}</span>}
+                                                {s.parts && s.parts.length > 0 && <span className="text-[10px] text-muted-foreground shrink-0 ml-auto">{s.parts.length} peça(s)</span>}
+                                            </div>
+                                        ))}
+                                        {appendPreview.dups.map((s, i) => (
+                                            <div key={`d-${i}`} className="flex items-center gap-2 text-xs opacity-50">
+                                                <span className="font-mono line-through shrink-0">{s.serviceOrder}</span>
+                                                <span className="text-[10px] text-muted-foreground">já na rota</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    )}
+
+                    <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleAppendPastedStops}
+                        disabled={appendPreview.news.length === 0}
+                        className="w-full sm:w-auto"
+                    >
+                        {appendPreview.news.length > 0
+                            ? `Adicionar ${appendPreview.news.length} parada(s)`
+                            : "Adicionar paradas coladas"}
+                    </Button>
                 </div>
 
             </CardContent>
@@ -1429,6 +1761,8 @@ export default function RoutesPage() {
     const contextLoading = loadingTech || loadingSo;
     const refreshDynamicData = () => queryClient.invalidateQueries();
 
+    // --- Draft routes (always fully loaded, should be small) ---
+    const [draftRoutes, setDraftRoutes] = useState<Route[]>([]);
     // --- Active routes (always fully loaded) ---
     const [activeRoutes, setActiveRoutes] = useState<Route[]>([]);
     // --- Inactive routes (paginated) ---
@@ -1442,11 +1776,15 @@ export default function RoutesPage() {
     const [selectedRoute, setSelectedRoute] = useState<Route | null>(null);
     const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
     const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
+    const [isDeleteDraftDialogOpen, setIsDeleteDraftDialogOpen] = useState(false);
+    const [routeToDelete, setRouteToDelete] = useState<Route | null>(null);
     const [showOnlyActive, setShowOnlyActive] = useState(true);
 
     const [activeTab, setActiveTab] = useState('list');
     const [formMode, setFormMode] = useState<'add' | 'edit'>('add');
     const [selectedRouteForEdit, setSelectedRouteForEdit] = useState<Route | null>(null);
+    const [isWizardOpen, setIsWizardOpen] = useState(false);
+    const [wizardInitialRoute, setWizardInitialRoute] = useState<Route | null>(null);
 
     const activeStopsForMap = useMemo(() => {
         if (!selectedRoute) return [];
@@ -1509,7 +1847,9 @@ export default function RoutesPage() {
         try {
             const cutoff15Days = subDays(new Date(), 15);
 
-            const [activeRoutesList, inactiveData, driversSnap] = await Promise.all([
+            const [draftRoutesList, activeRoutesList, inactiveData, driversSnap] = await Promise.all([
+                // Draft routes (should be small)
+                routeService.getDraftRoutes(),
                 // All active routes (no limit – should be small)
                 routeService.getActiveRoutes(),
                 // Inactive: only last 15 days
@@ -1517,6 +1857,7 @@ export default function RoutesPage() {
                 driverService.getAll()
             ]);
 
+            setDraftRoutes(draftRoutesList);
             setActiveRoutes(activeRoutesList);
 
             setInactiveRoutes(inactiveData.routes);
@@ -1552,9 +1893,30 @@ export default function RoutesPage() {
         fetchRoutes();
     }, [toast]);
 
-    // Derived display list
-    const filteredRoutes = showOnlyActive ? activeRoutes : [...activeRoutes, ...inactiveRoutes];
+    // Derived display list — rascunhos sempre aparecem primeiro, independente do filtro
+    // de ativas/inativas (não são "inativas", são um estado à parte, ainda não postado).
+    const filteredRoutes = showOnlyActive
+        ? [...draftRoutes, ...activeRoutes]
+        : [...draftRoutes, ...activeRoutes, ...inactiveRoutes];
 
+    const handleOpenDeleteDraftDialog = (route: Route) => {
+        setRouteToDelete(route);
+        setIsDeleteDraftDialogOpen(true);
+    };
+
+    const handleDeleteDraft = async () => {
+        if (!routeToDelete) return;
+        try {
+            await routeService.remove(routeToDelete.id);
+            toast({ title: "Rascunho excluído permanentemente." });
+            setIsDeleteDraftDialogOpen(false);
+            setRouteToDelete(null);
+            fetchRoutes();
+        } catch (error: any) {
+            console.error("Error deleting draft: ", error);
+            toast({ variant: "destructive", title: "Erro ao excluir", description: error?.message || "Não foi possível excluir o rascunho." });
+        }
+    };
 
     const handleCancelRoute = async () => {
         if (!selectedRoute) return;
@@ -1667,24 +2029,50 @@ export default function RoutesPage() {
         setActiveTab('form');
     };
 
-    const renderRouteActions = (route: Route) => (
-        <div className="flex flex-wrap gap-2 justify-end">
-            <Button variant="outline" size="sm" onClick={() => handleOpenViewDialog(route)}>
-                <Eye className="mr-2 h-4 w-4" /> Visualizar
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => handleOpenForm('edit', route)}>
-                <Edit className="mr-2 h-4 w-4" /> Editar
-            </Button>
-            {route.isActive && (
-                <Button size="sm" onClick={() => handleFinalizeRoute(route.id)}>
-                    <CheckCircle className="mr-2 h-4 w-4" /> Finalizar
+    const renderRouteActions = (route: Route) => {
+        if (route.isDraft) {
+            return (
+                <div className="flex items-center gap-1.5 justify-end">
+                    <Button size="sm" className="gap-1.5" onClick={() => { setWizardInitialRoute(route); setIsWizardOpen(true); }}>
+                        <Rocket className="h-3.5 w-3.5" /> Continuar Rascunho
+                    </Button>
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                        onClick={() => handleOpenDeleteDraftDialog(route)}
+                        title="Excluir permanentemente — só rascunhos podem, rotas já postadas só podem ser canceladas"
+                    >
+                        <Trash2 className="h-4 w-4" />
+                    </Button>
+                </div>
+            );
+        }
+        return (
+            <div className="flex items-center gap-1 justify-end">
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={() => handleOpenViewDialog(route)} title="Visualizar">
+                    <Eye className="h-4 w-4" />
                 </Button>
-            )}
-            <Button variant="destructive" size="sm" onClick={() => handleOpenCancelDialog(route)}>
-                <Trash2 className="mr-2 h-4 w-4" /> Cancelar Rota
-            </Button>
-        </div>
-    );
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={() => handleOpenForm('edit', route)} title="Editar">
+                    <Edit className="h-4 w-4" />
+                </Button>
+                {route.isActive && (
+                    <Button size="sm" className="gap-1.5" onClick={() => handleFinalizeRoute(route.id)}>
+                        <CheckCircle className="h-3.5 w-3.5" /> Finalizar
+                    </Button>
+                )}
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    onClick={() => handleOpenCancelDialog(route)}
+                    title="Cancelar Rota"
+                >
+                    <Trash2 className="h-4 w-4" />
+                </Button>
+            </div>
+        );
+    };
 
     return (
         <>
@@ -1696,9 +2084,14 @@ export default function RoutesPage() {
                             <FileDown className="mr-2 h-4 w-4" /> Exportar Relatório (Ativas)
                         </Button>
                         {activeTab === 'list' && (
-                            <Button onClick={() => handleOpenForm('add')}>
-                                <PlusCircle className="mr-2 h-4 w-4" /> Adicionar Rota
-                            </Button>
+                            <>
+                                <Button variant="outline" onClick={() => handleOpenForm('add')} title="Cria a rota já ativa direto, sem passar pelo assistente de rascunho/otimização/e-mail">
+                                    <Zap className="mr-2 h-4 w-4" /> Postagem Rápida
+                                </Button>
+                                <Button onClick={() => { setWizardInitialRoute(null); setIsWizardOpen(true); }}>
+                                    <PlusCircle className="mr-2 h-4 w-4" /> Adicionar Rota
+                                </Button>
+                            </>
                         )}
                         {activeTab === 'form' && (
                             <Button variant="outline" onClick={() => setActiveTab('list')}>
@@ -1785,8 +2178,11 @@ export default function RoutesPage() {
                                                     </div>
                                             </TableCell>
                                             <TableCell>
-                                                    <Badge variant={route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}>
-                                                        {route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
+                                                    <Badge
+                                                        variant={route.isDraft ? "outline" : route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}
+                                                        className={route.isDraft ? "border-amber-300 text-amber-700 bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:bg-amber-950" : undefined}
+                                                    >
+                                                        {route.isDraft ? "Rascunho" : route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
                                                     </Badge>
                                             </TableCell>
                                             <TableCell className="text-right space-x-2">
@@ -1832,8 +2228,11 @@ export default function RoutesPage() {
                                             <CardHeader>
                                                 <div className="flex justify-between items-start">
                                                     <CardTitle>{route.name}</CardTitle>
-                                                    <Badge variant={route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}>
-                                                        {route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
+                                                    <Badge
+                                                        variant={route.isDraft ? "outline" : route.isActive ? "default" : route.isCanceled ? "destructive" : "secondary"}
+                                                        className={route.isDraft ? "border-amber-300 text-amber-700 bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:bg-amber-950" : undefined}
+                                                    >
+                                                        {route.isDraft ? "Rascunho" : route.isActive ? "Ativa" : route.isCanceled ? "Cancelada" : "Finalizada"}
                                                     </Badge>
                                                 </div>
                                             </CardHeader>
@@ -1989,6 +2388,32 @@ export default function RoutesPage() {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+
+            <AlertDialog open={isDeleteDraftDialogOpen} onOpenChange={setIsDeleteDraftDialogOpen}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>Excluir rascunho permanentemente?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            Esta ação não pode ser desfeita. O rascunho
+                            <span className="font-bold mx-1">{routeToDelete?.name}</span>
+                            será apagado por completo — diferente de uma rota já postada, que só pode ser cancelada.
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel onClick={() => setRouteToDelete(null)}>Voltar</AlertDialogCancel>
+                        <AlertDialogAction onClick={handleDeleteDraft} className="bg-destructive hover:bg-destructive/90">
+                           Sim, excluir permanentemente
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
+            <RouteCreationWizard
+                open={isWizardOpen}
+                onOpenChange={(o) => { setIsWizardOpen(o); if (!o) setWizardInitialRoute(null); }}
+                initialRoute={wizardInitialRoute}
+                onCompleted={() => { fetchRoutes(); refreshDynamicData(); setWizardInitialRoute(null); }}
+            />
         </>
     );
 }

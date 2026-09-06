@@ -9,6 +9,7 @@ import { format, isAfter, startOfMonth, startOfYear, subDays, differenceInDays }
 import { type Technician, type ServiceOrder, type Preset, type Return, type Indicator, type Route, type RouteStop, type Chargeback, type RoutePart, type ChecklistTemplate, type ChecklistField } from "@/lib/data";
 import { copyToClipboard } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -29,7 +30,9 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -38,7 +41,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
-import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle, AlertCircle, Tv } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle, ChevronsUpDown, Copy, Wrench, LogIn, ListTree, ClipboardCheck, ShieldCheck, Bookmark, Package, PackageOpen, History, Trophy, Sparkles, Target, ChevronDown, Route as RouteIcon, Eye, Calendar, MapPin, Sun, Car, MessageSquare, Download, Users, User, Percent, Link as LinkIcon, Trash2, TrendingUp, ScanLine, QrCode, XCircle, AlertCircle, Tv, Camera } from "lucide-react";
 import Link from 'next/link';
 
 import { serviceOrderService } from "@/services/supabase/serviceOrderService";
@@ -77,7 +80,7 @@ import React from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { ptBR } from 'date-fns/locale';
-import SignatureCanvas from 'react-signature-canvas';
+import { SignaturePad } from '@/components/SignaturePad';
 import dynamic from "next/dynamic";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
@@ -130,6 +133,8 @@ const formSchema = z.object({
   isFinalized: z.boolean().default(true),
   pendingReason: z.string().optional(),
   samsungLpSurveyPerformed: z.boolean().optional(),
+  samsungLpSurveyRating: z.number().min(0).max(10).optional(),
+  samsungLpSurveyNotDoneReason: z.string().optional(),
 }).superRefine((data, ctx) => {
   if (data.isFinalized === false) {
     if (!data.pendingReason) {
@@ -202,6 +207,41 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
+
+/*
+  LpSurveyRatingButtons — seletor de nota 0 a 10 (padrão NPS) para a pesquisa
+  de satisfação LP. Verde para promotores (9–10), amarelo para neutros (7–8),
+  vermelho para detratores (0–6).
+*/
+function LpSurveyRatingButtons({ value, onChange }: { value?: number; onChange: (n: number) => void }) {
+  const classesFor = (n: number) => {
+    const selected = value === n;
+    if (n >= 9) return selected
+      ? "bg-emerald-500 text-white border-emerald-600 shadow"
+      : "bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/40";
+    if (n >= 7) return selected
+      ? "bg-amber-500 text-white border-amber-600 shadow"
+      : "bg-white dark:bg-slate-900 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800 hover:bg-amber-50 dark:hover:bg-amber-950/40";
+    return selected
+      ? "bg-red-500 text-white border-red-600 shadow"
+      : "bg-white dark:bg-slate-900 text-red-700 dark:text-red-300 border-red-300 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-950/40";
+  };
+  return (
+    <div className="flex items-center gap-1">
+      {Array.from({ length: 11 }, (_, n) => (
+        <button
+          type="button"
+          key={n}
+          onClick={() => onChange(n)}
+          aria-pressed={value === n}
+          className={cn("flex-1 min-w-0 h-8 rounded-md border text-xs font-bold transition-all", classesFor(n))}
+        >
+          {n}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 
 
@@ -461,9 +501,22 @@ function ChecklistSection({
                             </SelectTrigger>
                             <SelectContent>
                                 <SelectItem value="none">Nenhum</SelectItem>
-                                {checklistTemplates.map(t => (
-                                    <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                                ))}
+                                {Object.entries(
+                                    checklistTemplates.reduce<Record<string, ChecklistTemplate[]>>((acc, t) => {
+                                        const key = t.category?.trim() || 'Outros';
+                                        (acc[key] ||= []).push(t);
+                                        return acc;
+                                    }, {})
+                                )
+                                    .sort(([a], [b]) => (a === 'Outros' ? 1 : b === 'Outros' ? -1 : a.localeCompare(b)))
+                                    .map(([category, group]) => (
+                                        <SelectGroup key={category}>
+                                            <SelectLabel>{category}</SelectLabel>
+                                            {group.map(t => (
+                                                <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                                            ))}
+                                        </SelectGroup>
+                                    ))}
                             </SelectContent>
                         </Select>
                     </div>
@@ -507,14 +560,11 @@ function ChecklistSection({
                                             </div>
                                         ) : (
                                             <div className="border rounded-md overflow-hidden bg-white shadow-sm border-gray-300">
-                                                <SignatureCanvas 
+                                                <SignaturePad
                                                     ref={(ref) => {
                                                         if (ref) signatureRefs.current[field.id] = ref;
                                                     }}
                                                     penColor="black"
-                                                    canvasProps={{
-                                                        className: 'signature-canvas w-full h-40'
-                                                    }}
                                                 />
                                                 <div className="bg-muted p-1 flex justify-end border-t">
                                                     <Button type="button" variant="ghost" size="sm" onClick={() => signatureRefs.current[field.id]?.clear()}>Limpar Assinatura</Button>
@@ -621,7 +671,9 @@ const { toast } = useToast();
       cleaningPerformed: false,
       isFinalized: true,
       pendingReason: "",
-      samsungLpSurveyPerformed: false,
+      samsungLpSurveyPerformed: true,
+      samsungLpSurveyRating: undefined,
+      samsungLpSurveyNotDoneReason: "",
     },
   });
 
@@ -659,16 +711,49 @@ const { toast } = useToast();
               fieldsToValidate.push('repairCode');
           }
       }
+
+      // Pesquisa de Satisfação LP: exige nota (0-10) sempre, e justificativa quando não realizada.
+      const lpApplies = sType === 'reparo_samsung' &&
+        ((currentRouteStop?.warrantyType === 'LP') || (!currentRouteStop && form.getValues('samsungRepairType') === 'LP'));
+      if (lpApplies) {
+          const performed = form.getValues('samsungLpSurveyPerformed');
+          const rating = form.getValues('samsungLpSurveyRating');
+          if (!performed && !form.getValues('samsungLpSurveyNotDoneReason')?.trim()) {
+              toast({
+                  variant: "destructive",
+                  title: "⚠️ Justifique a pesquisa não realizada",
+                  description: "Informe o motivo pelo qual a pesquisa de satisfação LP não foi feita.",
+              });
+              return;
+          }
+          if (rating === undefined || rating === null) {
+              toast({
+                  variant: "destructive",
+                  title: "⚠️ Informe a nota (0 a 10)",
+                  description: performed
+                      ? "Selecione a nota da pesquisa de satisfação LP."
+                      : "Selecione a nota que o cliente possivelmente daria.",
+              });
+              return;
+          }
+      }
     }
 
     const isValid = await form.trigger(fieldsToValidate);
     if (isValid) {
-      setCurrentStep(prev => Math.min(prev + 1, totalSteps));
+      const notFinalized = form.getValues('isFinalized') === false;
+      // Atendimento não finalizado não precisa dos "Detalhes" — pula do Status (2) para o Fim (4).
+      const nextStep = (currentStep === 2 && notFinalized) ? 4 : currentStep + 1;
+      setCurrentStep(Math.min(nextStep, totalSteps));
     }
   };
 
   const handlePrevStep = () => {
-    setCurrentStep(prev => Math.max(prev - 1, 1));
+    const notFinalized = form.getValues('isFinalized') === false;
+    setCurrentStep(prev => {
+      const target = (prev === 4 && notFinalized) ? 2 : prev - 1;
+      return Math.max(target, 1);
+    });
   };
 
   const allFormValues = form.watch();
@@ -684,11 +769,21 @@ const { toast } = useToast();
         } catch (e) {
             console.error("Failed to parse form data from localStorage", e);
         }
+        // Pré-preenche o número da OS quando aberto via ?os=... (botão "Lançar"
+        // nos Detalhes da Rota). Aplicado após o reset para prevalecer sobre o
+        // rascunho salvo; o effect de detecção de parada cuida do restante.
+        const osParam = new URLSearchParams(window.location.search).get('os');
+        if (osParam) {
+            form.setValue('serviceOrderNumber', osParam);
+        }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); 
+    }, []);
 
     useEffect(() => {
-      localStorage.setItem('serviceOrderFormData', JSON.stringify(allFormValues));
+      // Não persistir o estado desses toggles — devem começar zerados a cada OS,
+      // sem carregar o valor da OS anterior.
+      const { cleaningPerformed, samsungBudgetApproved, samsungBudgetValue, ...persisted } = allFormValues;
+      localStorage.setItem('serviceOrderFormData', JSON.stringify(persisted));
     }, [allFormValues]);
 
 
@@ -703,6 +798,8 @@ const { toast } = useToast();
   const watchedPreset = form.watch("presetId");
   const watchedSamsungRepairType = form.watch("samsungRepairType");
   const watchedServiceOrderNumber = form.watch("serviceOrderNumber");
+  const watchedIsFinalized = form.watch("isFinalized");
+  const watchedLpSurveyPerformed = form.watch("samsungLpSurveyPerformed");
   const { resetField, setValue } = form;
 
   useEffect(() => {
@@ -844,6 +941,25 @@ const { toast } = useToast();
     }
   }, [partsStatus, partsUsedQuantity, currentRouteStop, setValue, form]);
 
+  // Atendimento não finalizado ⇒ nenhuma peça foi usada. Marca automaticamente todas
+  // as peças da parada como "não usadas". Roda quando o técnico desmarca "Finalizado"
+  // e também se as peças da rota carregarem depois (idempotente: não sobrescreve à toa
+  // e não impede o técnico de marcar uma peça como usada depois, se precisar).
+  useEffect(() => {
+    if (watchedIsFinalized !== false) return;
+    const parts = currentRouteStop?.parts || [];
+    if (parts.length === 0) return;
+    setPartsStatus(prev => {
+      let changed = false;
+      const next = { ...prev };
+      parts.forEach((p: { code: string }) => {
+        if (next[p.code] !== 'not_used') { next[p.code] = 'not_used'; changed = true; }
+      });
+      return changed ? next : prev;
+    });
+    setPartsUsedQuantity(prev => (Object.keys(prev).length > 0 ? {} : prev));
+  }, [watchedIsFinalized, currentRouteStop]);
+
 
   const previewText = useMemo(() => {
     const data = allFormValues;
@@ -899,7 +1015,11 @@ const { toast } = useToast();
 
     const optionalParts = [
         data.replacedPart ? `- **Peça Trocada:** ${data.replacedPart}` : '',
-        ((data.samsungRepairType === 'LP' || currentRouteStop?.warrantyType === 'LP') && data.samsungLpSurveyPerformed) ? `- **Pesquisa de Satisfação LP:** Realizada` : '',
+        (data.samsungRepairType === 'LP' || currentRouteStop?.warrantyType === 'LP')
+          ? (data.samsungLpSurveyPerformed
+              ? `- **Pesquisa de Satisfação LP:** Realizada${data.samsungLpSurveyRating !== undefined ? ` (Nota: ${data.samsungLpSurveyRating}/10)` : ''}`
+              : `- **Pesquisa de Satisfação LP:** Não realizada${data.samsungLpSurveyNotDoneReason ? ` — ${data.samsungLpSurveyNotDoneReason}` : ''}${data.samsungLpSurveyRating !== undefined ? ` (Nota possível do cliente: ${data.samsungLpSurveyRating}/10)` : ''}`)
+          : '',
         data.observations ? `- **Observações:** ${data.observations}` : ''
     ].filter(Boolean);
 
@@ -935,8 +1055,12 @@ const { toast } = useToast();
             symptomCode: data.symptomCode || '',
             repairCode: data.repairCode || '',
             replacedPart: data.replacedPart || '',
-            observations: ((data.samsungRepairType === 'LP' || currentRouteStop?.warrantyType === 'LP') && data.samsungLpSurveyPerformed)
-                ? `${data.observations || ''}\n[Pesquisa LP realizada: Sim]`.trim()
+            observations: (data.samsungRepairType === 'LP' || currentRouteStop?.warrantyType === 'LP')
+                ? `${data.observations || ''}\n${
+                    data.samsungLpSurveyPerformed
+                      ? `[Pesquisa LP realizada: Sim${data.samsungLpSurveyRating !== undefined ? ` | Nota: ${data.samsungLpSurveyRating}/10` : ''}]`
+                      : `[Pesquisa LP realizada: Não${data.samsungLpSurveyNotDoneReason ? ` | Motivo: ${data.samsungLpSurveyNotDoneReason}` : ''}${data.samsungLpSurveyRating !== undefined ? ` | Nota possível: ${data.samsungLpSurveyRating}/10` : ''}]`
+                  }`.trim()
                 : data.observations || '',
             defectFound: data.defectFound || '',
             partsRequested: data.partsRequested || '',
@@ -1008,7 +1132,9 @@ const { toast } = useToast();
         cleaningPerformed: false,
         isFinalized: true,
         pendingReason: "",
-        samsungLpSurveyPerformed: false,
+        samsungLpSurveyPerformed: true,
+        samsungLpSurveyRating: undefined,
+        samsungLpSurveyNotDoneReason: "",
     });
      setGeneratedText("");
     setOsIsSaved(false);
@@ -1089,12 +1215,14 @@ const { toast } = useToast();
                                             const Icon = s.icon;
                                             const isActive = currentStep === s.step;
                                             const isCompleted = currentStep > s.step;
+                                            // "Detalhes" é pulado quando o atendimento não é finalizado.
+                                            const isSkipped = s.step === 3 && watchedIsFinalized === false;
                                             return (
-                                                <div key={s.step} className="flex items-center flex-1 last:flex-initial">
+                                                <div key={s.step} className={cn("flex items-center flex-1 last:flex-initial", isSkipped && "opacity-40")}>
                                                     <div className="flex items-center">
                                                         <div className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-all shrink-0 ${
-                                                            isActive ? 'border-[#1a85ff] bg-[#1a85ff] text-white shadow-sm scale-105' : 
-                                                            isCompleted ? 'border-[#1a85ff] bg-transparent text-[#1a85ff]' : 
+                                                            isActive ? 'border-primary bg-primary text-primary-foreground shadow-sm scale-105' :
+                                                            isCompleted && !isSkipped ? 'border-primary bg-transparent text-primary' :
                                                             'border-muted bg-transparent text-muted-foreground'
                                                         }`}>
                                                             <Icon className="h-4 w-4" />
@@ -1103,13 +1231,13 @@ const { toast } = useToast();
                                                             "ml-2 text-sm font-semibold transition-all whitespace-nowrap",
                                                             isActive ? "text-foreground inline" : "text-muted-foreground hidden md:inline"
                                                         )}>
-                                                            {s.title}
+                                                            {s.title}{isSkipped && <span className="ml-1 text-[10px] font-normal">(pulado)</span>}
                                                         </span>
                                                     </div>
                                                     {index < 3 && (
                                                         <div className={cn(
                                                             "flex-1 h-[2px] mx-2 min-w-[0.75rem] transition-colors duration-300",
-                                                            isCompleted ? 'bg-[#1a85ff]' : 'bg-muted'
+                                                            isCompleted ? 'bg-primary' : 'bg-muted'
                                                         )} />
                                                     )}
                                                 </div>
@@ -1238,18 +1366,9 @@ const { toast } = useToast();
                                                                     <div className="text-xs text-muted-foreground">Desmarque caso precise de mais peças, reagendamento ou peça com defeito</div>
                                                                 </div>
                                                                 <FormControl>
-                                                                    <Switch 
-                                                                        checked={field.value} 
-                                                                        onCheckedChange={(val) => {
-                                                                            field.onChange(val);
-                                                                            if (!val && currentRouteStop?.parts) {
-                                                                                const newStatus = { ...partsStatus };
-                                                                                currentRouteStop.parts.forEach((p: { code: string }) => {
-                                                                                    newStatus[p.code] = 'not_used';
-                                                                                });
-                                                                                setPartsStatus(newStatus);
-                                                                            }
-                                                                        }} 
+                                                                    <Switch
+                                                                        checked={field.value}
+                                                                        onCheckedChange={field.onChange}
                                                                     />
                                                                 </FormControl>
                                                             </FormItem>
@@ -1520,6 +1639,50 @@ const { toast } = useToast();
                                                                             </FormControl>
                                                                         </FormItem>
                                                                     )}/>
+
+                                                                    {watchedLpSurveyPerformed ? (
+                                                                        <FormField control={form.control} name="samsungLpSurveyRating" render={({ field }) => (
+                                                                            <FormItem className="rounded-lg border border-emerald-200 dark:border-emerald-900 bg-white dark:bg-slate-900 p-3 shadow-sm space-y-2">
+                                                                                <FormLabel className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                                                                    Nota da pesquisa (0 a 10)
+                                                                                </FormLabel>
+                                                                                <FormControl>
+                                                                                    <LpSurveyRatingButtons value={field.value} onChange={field.onChange} />
+                                                                                </FormControl>
+                                                                                <FormMessage />
+                                                                            </FormItem>
+                                                                        )}/>
+                                                                    ) : (
+                                                                        <div className="rounded-lg border border-red-200 dark:border-red-900 bg-white dark:bg-slate-900 p-3 shadow-sm space-y-3">
+                                                                            <FormField control={form.control} name="samsungLpSurveyNotDoneReason" render={({ field }) => (
+                                                                                <FormItem className="space-y-1">
+                                                                                    <FormLabel className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                                                                        Por que a pesquisa não foi realizada?
+                                                                                    </FormLabel>
+                                                                                    <FormControl>
+                                                                                        <Textarea
+                                                                                            placeholder="Justifique o motivo (ex: cliente recusou, sem internet no local, etc.)"
+                                                                                            className="text-sm resize-none"
+                                                                                            rows={2}
+                                                                                            {...field}
+                                                                                        />
+                                                                                    </FormControl>
+                                                                                    <FormMessage />
+                                                                                </FormItem>
+                                                                            )}/>
+                                                                            <FormField control={form.control} name="samsungLpSurveyRating" render={({ field }) => (
+                                                                                <FormItem className="space-y-2">
+                                                                                    <FormLabel className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                                                                        Nota possível do cliente (0 a 10)
+                                                                                    </FormLabel>
+                                                                                    <FormControl>
+                                                                                        <LpSurveyRatingButtons value={field.value} onChange={field.onChange} />
+                                                                                    </FormControl>
+                                                                                    <FormMessage />
+                                                                                </FormItem>
+                                                                            )}/>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                              )}
                                                         </div>
@@ -1638,17 +1801,17 @@ const { toast } = useToast();
 
                                             <div className="flex gap-3 pt-4 border-t mt-4">
                                                 {currentStep > 1 && (
-                                                    <Button type="button" onClick={handlePrevStep} className="flex-1 h-12 bg-[#9900ff] hover:bg-[#8000d6] text-white font-medium text-base shadow-none">
+                                                    <Button type="button" variant="outline" onClick={handlePrevStep} className="flex-1 h-12 font-medium text-base shadow-none">
                                                         Voltar
                                                     </Button>
                                                 )}
-                                                
+
                                                 {currentStep < totalSteps ? (
-                                                    <Button type="button" onClick={handleNextStep} className="flex-1 h-12 bg-[#1a85ff] hover:bg-[#156fc2] text-white font-medium text-base shadow-none">
+                                                    <Button type="button" onClick={handleNextStep} className="flex-1 h-12 font-medium text-base shadow-none">
                                                         Próximo
                                                     </Button>
                                                 ) : (
-                                                    <Button type="button" onClick={form.handleSubmit(onSubmit)} disabled={form.formState.isSubmitting || osIsSaved} className="flex-1 h-12 bg-[#1a85ff] hover:bg-[#156fc2] text-white text-base md:text-sm font-medium shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                                                    <Button type="button" onClick={form.handleSubmit(onSubmit)} disabled={form.formState.isSubmitting || osIsSaved} className="flex-1 h-12 text-base md:text-sm font-medium shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                                                         {form.watch('isFinalized') ? (
                                                             <div className="flex items-center justify-center gap-2">
                                                                 <CheckCircle className="h-4 w-4" /> {form.formState.isSubmitting ? 'Salvando...' : osIsSaved ? 'Salva!' : 'Salvar OS'}
@@ -1725,7 +1888,7 @@ const { toast } = useToast();
                     </div>
                     <DialogFooter className="flex flex-col sm:flex-row gap-2">
                         <Button
-                            className="w-full sm:flex-1 bg-[#1a85ff] hover:bg-[#156fc2]"
+                            className="w-full sm:flex-1"
                             onClick={handleCopy}
                         >
                             <Copy className="mr-2 h-4 w-4" /> Copiar Texto
@@ -1741,6 +1904,17 @@ const { toast } = useToast();
                             Nova OS
                         </Button>
                     </DialogFooter>
+                    <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed border-border p-3 mt-1">
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Camera className="h-4 w-4 shrink-0" />
+                            <span>Quer registrar fotos e a descrição do reparo desta OS?</span>
+                        </div>
+                        <Button asChild variant="ghost" size="sm" className="shrink-0">
+                            <Link href={`/reports?os=${encodeURIComponent(allFormValues.serviceOrderNumber || "")}`} target="_blank">
+                                Preencher Relatório <Badge variant="secondary" className="ml-2 font-normal">opcional</Badge>
+                            </Link>
+                        </Button>
+                    </div>
                 </DialogContent>
             </Dialog>
         </div>

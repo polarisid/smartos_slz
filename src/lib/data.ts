@@ -159,6 +159,41 @@ export type Indicator = {
   currentValue?: number;
 }
 
+export type IndicatorMetricUnit = 'percent' | 'currency' | 'number' | 'days';
+export type IndicatorMetricDirection = 'up' | 'down' | null;
+
+export type IndicatorMetricPoint = {
+  period: string; // ex: "2026.01" (mês) ou "2026.29" (semana)
+  value: number | null;
+};
+
+export type IndicatorMetric = {
+  key: string; // estável entre uploads, ex: "ftc__ftc-so"
+  section: string; // ex: "FTC", "Velocidade", "Qualidade"
+  name: string; // ex: "FTC SO"
+  unit: IndicatorMetricUnit;
+  meta: number | null;
+  direction: IndicatorMetricDirection;
+  monthly: IndicatorMetricPoint[];
+  weekly: IndicatorMetricPoint[];
+};
+
+export type IndicatorReport = {
+  id: string;
+  fileName?: string;
+  partnerName?: string;
+  location?: string;
+  metrics: IndicatorMetric[];
+  uploadedAt: Date;
+};
+
+export type TrackedIndicatorMetric = {
+  id: string;
+  metricKey: string;
+  metricName?: string;
+  metricSection?: string;
+};
+
 export type RoutePart = {
     code: string;
     description: string;
@@ -197,6 +232,9 @@ export type RouteStop = {
     suggestedCityState?: string;
     confirmedByCall?: boolean;
     confirmedByMessage?: boolean;
+    // Estado tri-state da confirmação por mensagem: enviada → confirmada.
+    // Mantido em sincronia com confirmedByMessage (true quando 'confirmed').
+    messageStatus?: 'sent' | 'confirmed';
 }
 
 export type Route = {
@@ -238,7 +276,41 @@ export type ChecklistTemplate = {
   pdfUrl: string;
   fields: ChecklistField[];
   type?: 'counter' | 'field';
+  category?: string;
 }
+
+export type TechnicalReportPhotoCategory = 'produto_frontal' | 'produto_traseira' | 'produto_serial' | 'defeito' | 'pos_reparo';
+
+export type TechnicalReportPhoto = {
+  category: TechnicalReportPhotoCategory;
+  url: string;
+  path: string;
+  order: number;
+};
+
+export type TechnicalReportType = 'reparo' | 'visita';
+
+export type TechnicalReport = {
+  id: string;
+  serviceOrderNumber: string;
+  reportType?: TechnicalReportType;
+  technicianId?: string;
+  technicianName?: string;
+  consumerName?: string;
+  productModel?: string;
+  serialNumber?: string;
+  photos: TechnicalReportPhoto[];
+  repairDescription?: string;
+  observations?: string;
+  responsibleName?: string;
+  responsibleSignature?: string;
+  clientSignature?: string;
+  aiScore?: number;
+  aiScoreFeedback?: string;
+  checklistTemplateId?: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 
 const today = new Date();
