@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQueryClient } from "@tanstack/react-query";
-import { format } from "date-fns";
+import { format, getISOWeek } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
@@ -83,6 +83,9 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
   const [baseAddress, setBaseAddress] = useState("Aracaju");
 
   // ── Passo 1: rascunho ──
+  // Semana ISO atual (ex: "W27") - só é inserida no nome se a pessoa clicar no botão,
+  // nunca preenchida sozinha (o nome pode ser de uma rota de outra semana).
+  const currentWeekLabel = `W${String(getISOWeek(new Date())).padStart(2, "0")}`;
   const [name, setName] = useState("");
   const [routeType, setRouteType] = useState<"capital" | "interior">("capital");
   const [plannedDate, setPlannedDate] = useState<Date | undefined>(undefined);
@@ -112,6 +115,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
   // ── Passo 3: turnos e datas ──
   const [legKm, setLegKm] = useState<number[]>([]);
   const [legDurationMin, setLegDurationMin] = useState<number[]>([]);
+  const [origDurationMin, setOrigDurationMin] = useState<number[]>([]);
   const [legsLoading, setLegsLoading] = useState(false);
   const [departureDate, setDepartureDate] = useState<Date | undefined>(undefined);
   const [arrivalDate, setArrivalDate] = useState<Date | undefined>(undefined);
@@ -134,7 +138,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
     setTechnicianId(""); setDriverId(""); setLicensePlate("TEM8E13"); setFuelAvgKml(10);
     setPasteText(""); setStops([]);
     setOptimizationSummary(""); setOrigKm([]); setPropKm([]);
-    setLegKm([]); setLegDurationMin([]);
+    setLegKm([]); setLegDurationMin([]); setOrigDurationMin([]);
     setDepartureDate(undefined); setArrivalDate(undefined);
     setEmailConfirmed(false);
     setHasOptimized(false);
@@ -337,6 +341,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
       setPropKm(prop.km);
       setLegKm(prop.km);
       setLegDurationMin(prop.durationMin);
+      setOrigDurationMin(orig.durationMin);
       setHasOptimized(true);
     } catch (e) {
       console.error(e);
@@ -391,6 +396,14 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
   const totalPropKm = propKm.reduce((a, b) => a + b, 0);
   const kmSaved = totalOrigKm - totalPropKm;
   const kmSavedPct = totalOrigKm > 0 ? Math.round((kmSaved / totalOrigKm) * 100) : 0;
+  const totalPropMin = legDurationMin.reduce((a, b) => a + b, 0);
+  const totalOrigMin = origDurationMin.reduce((a, b) => a + b, 0);
+  const fmtMin = (min: number) => {
+    const total = Math.round(min);
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return h > 0 ? `${h}h ${String(m).padStart(2, "0")}min` : `${m}min`;
+  };
 
   const handleAdvanceStep2 = async () => {
     if (!routeId) return;
@@ -645,7 +658,18 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                     <div className="space-y-4">
                       <div className="space-y-1.5">
                         <Label>Nome da Rota *</Label>
-                        <Input placeholder="Ex: W31 - ROTA CAPITAL - PEDRO" value={name} onChange={e => setName(e.target.value)} />
+                        <div className="flex gap-2">
+                          <Input placeholder="Ex: W31 - ROTA CAPITAL - PEDRO" value={name} onChange={e => setName(e.target.value)} className="flex-1" />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="shrink-0 font-mono font-bold"
+                            title={`Inserir semana atual (${currentWeekLabel}) no início do nome`}
+                            onClick={() => setName(prev => `${currentWeekLabel} - ${prev.replace(/^W\d+\s*-\s*/i, "")}`)}
+                          >
+                            {currentWeekLabel}
+                          </Button>
+                        </div>
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-1.5">
@@ -762,6 +786,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                             <p className="font-mono text-xl font-bold text-muted-foreground">
                               {totalOrigKm.toFixed(1)} <span className="text-xs font-sans font-normal">km</span>
                             </p>
+                            {totalOrigMin > 0 && <p className="text-[11px] text-muted-foreground">≈ {fmtMin(totalOrigMin)}</p>}
                           </div>
                           <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
                           <div>
@@ -769,6 +794,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                             <p className="font-mono text-xl font-bold text-foreground">
                               {totalPropKm.toFixed(1)} <span className="text-xs font-sans font-normal">km</span>
                             </p>
+                            {totalPropMin > 0 && <p className="text-[11px] font-medium text-foreground">≈ {fmtMin(totalPropMin)} de percurso</p>}
                           </div>
                           <div className="ml-auto">
                             {kmSaved > 0.05 ? (
@@ -792,6 +818,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                           <p className="font-mono text-xl font-bold text-foreground">
                             {totalPropKm.toFixed(1)} <span className="text-xs font-sans font-normal">km</span>
                           </p>
+                          {totalPropMin > 0 && <p className="text-[11px] text-muted-foreground">≈ {fmtMin(totalPropMin)} de percurso</p>}
                         </div>
                       ) : null}
                     </div>
@@ -843,6 +870,7 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                                   isMoved={isMoved}
                                   posDiff={posDiff}
                                   segKm={propKm[i]}
+                                  segDurationMin={legDurationMin[i]}
                                   segsLoading={isOptimizing || isLoadingLegs}
                                   isHovered={hoveredStopId === stop.serviceOrder}
                                   onHover={setHoveredStopId}
@@ -909,23 +937,52 @@ export function RouteCreationWizard({ open, onOpenChange, initialRoute, onComple
                     </div>
 
                     <div className="max-w-3xl space-y-1">
-                      {stops.map((stop, i) => (
-                        <StopSummaryCard
-                          key={stop.serviceOrder}
-                          stop={stop}
-                          position={i + 1}
-                          legKm={legKm[i]}
-                          legDurationMin={legDurationMin[i]}
-                          legsLoading={legsLoading}
-                          onSetTurn={(turn) => handleSetTurn(i, turn)}
-                          onSetVisitDate={(date) => handleSetVisitDate(i, date)}
-                          onToggleCall={() => handleToggleCall(i)}
-                          onToggleMessage={() => handleToggleMessage(i)}
-                          lastVisit={lastVisitByOs.get(stop.serviceOrder) || null}
-                          lastVisitTechnicianName={technicians.find(t => t.id === lastVisitByOs.get(stop.serviceOrder)?.technicianId)?.name}
-                          lastVisitTotal={visitCountByOs.get(stop.serviceOrder) || 1}
-                        />
-                      ))}
+                      {(() => {
+                        // Marca onde cada dia começa (mesma "Data da visita") pra fechar um
+                        // traço de resumo (OS + km rodado) sempre que o dia muda ou acaba.
+                        let dayStartIndex = 0;
+                        return stops.map((stop, i) => {
+                          const nextStop = stops[i + 1];
+                          const dayEnds = !nextStop || (nextStop.firstVisitDate || "") !== (stop.firstVisitDate || "");
+                          let daySummary: { label: string; osCount: number; km: number } | null = null;
+                          if (dayEnds) {
+                            const km = legKm.slice(dayStartIndex, i + 1).reduce((a, b) => (b !== undefined ? a + b : a), 0);
+                            daySummary = {
+                              label: stop.firstVisitDate?.trim() || "Sem data definida",
+                              osCount: i - dayStartIndex + 1,
+                              km,
+                            };
+                            dayStartIndex = i + 1;
+                          }
+                          return (
+                            <Fragment key={stop.serviceOrder}>
+                              <StopSummaryCard
+                                stop={stop}
+                                position={i + 1}
+                                legKm={legKm[i]}
+                                legDurationMin={legDurationMin[i]}
+                                legsLoading={legsLoading}
+                                onSetTurn={(turn) => handleSetTurn(i, turn)}
+                                onSetVisitDate={(date) => handleSetVisitDate(i, date)}
+                                onToggleCall={() => handleToggleCall(i)}
+                                onToggleMessage={() => handleToggleMessage(i)}
+                                lastVisit={lastVisitByOs.get(stop.serviceOrder) || null}
+                                lastVisitTechnicianName={technicians.find(t => t.id === lastVisitByOs.get(stop.serviceOrder)?.technicianId)?.name}
+                                lastVisitTotal={visitCountByOs.get(stop.serviceOrder) || 1}
+                              />
+                              {daySummary && !legsLoading && (
+                                <div className="flex items-center gap-2 my-2.5">
+                                  <div className="flex-1 h-px bg-border" />
+                                  <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wide bg-muted px-2.5 py-1 rounded-full whitespace-nowrap">
+                                    {daySummary.label} · {daySummary.osCount} OS · {daySummary.km.toFixed(1)} km
+                                  </span>
+                                  <div className="flex-1 h-px bg-border" />
+                                </div>
+                              )}
+                            </Fragment>
+                          );
+                        });
+                      })()}
 
                       {/* Trecho final: retorno à base, fecha o circuito da rota */}
                       {stops.length > 0 && (
