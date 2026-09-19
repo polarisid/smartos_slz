@@ -75,9 +75,14 @@ type RouteLeg = {
     // Status do trecho: 'completed' pinta o percurso já concluído de verde.
     status: 'completed' | 'pending' | 'todo';
     hasFerry: boolean;
-    // Rota alternativa 100% rodoviária (exclude=ferry), só buscada quando hasFerry - pra
-    // o usuário poder optar por não usar a balsa e ver o percurso/tempo recalculados.
+    // Rota alternativa 100% rodoviária (via alternatives=true do OSRM), só buscada
+    // quando hasFerry - pra o usuário poder optar por não usar a balsa.
     noFerry?: FerryAlternative;
+    // Parada de onde esse trecho SAI (undefined só na primeira perna, Base → 1ª parada,
+    // que não tem parada anterior pra guardar a preferência) - usado pra persistir a
+    // escolha de evitar balsa direto na parada, sem precisar de coluna nova no banco.
+    fromServiceOrder?: string;
+    fromStopAvoidFerry?: boolean;
 };
 
 type MapStop = {
@@ -94,6 +99,10 @@ interface RouteMapProps {
     polylineColor?: string;
     height?: string;
     baseAddress?: string;
+    // Chamado quando o usuário liga/desliga "evitar balsa" num trecho que sai de uma
+    // parada real - permite ao componente pai persistir a escolha (ex: salvando a
+    // rota). Sem essa prop, a escolha continua funcionando, só que só nessa sessão.
+    onFerryPreferenceChange?: (serviceOrder: string, avoid: boolean) => void;
 }
 
 // fetch() não tem timeout embutido - sem isso, um servidor OSRM público lento/instável
@@ -204,7 +213,8 @@ export default function RouteMap({
     showPolyline = true,
     polylineColor = '#8b5cf6',
     height = '500px',
-    baseAddress = "Avenida Barão de Maruim, 83, São José, Aracaju - SE"
+    baseAddress = "Avenida Barão de Maruim, 83, São José, Aracaju - SE",
+    onFerryPreferenceChange
 }: RouteMapProps) {
     const [mapStops, setMapStops] = useState<MapStop[]>([]);
     const [baseCoords, setBaseCoords] = useState<[number, number] | null>([-10.9142, -37.0545]);
@@ -212,6 +222,8 @@ export default function RouteMap({
     const [loading, setLoading] = useState(true);
     // Trechos com balsa onde o usuário optou por recalcular só por rodovia -
     // por padrão usa a balsa (rota mais rápida), já que é opcional desmarcar.
+    // Semeado a partir de RouteStop.avoidFerryToNext sempre que os trechos são
+    // recalculados (loadLegs), então uma preferência já salva volta marcada.
     const [avoidFerryLegs, setAvoidFerryLegs] = useState<Set<string>>(new Set());
     const toggleAvoidFerry = (legId: string) => {
         setAvoidFerryLegs(prev => {
@@ -220,6 +232,14 @@ export default function RouteMap({
             else next.add(legId);
             return next;
         });
+    };
+    // Alterna o trecho localmente (feedback visual imediato) e, se der pra persistir
+    // (trecho ligado a uma parada real + o pai souber salvar), avisa o componente pai.
+    const handleToggleFerry = (leg: RouteLeg) => {
+        toggleAvoidFerry(leg.id);
+        if (leg.fromServiceOrder && onFerryPreferenceChange) {
+            onFerryPreferenceChange(leg.fromServiceOrder, !leg.fromStopAvoidFerry);
+        }
     };
     const [mapStyle, setMapStyle] = useState<'google' | 'google_satellite' | 'carto'>('carto');
 
@@ -316,6 +336,7 @@ export default function RouteMap({
 
             for (const [routeKey, stops] of groups) {
                 const points: PointWithStatus[] = [];
+                const baseOffset = baseCoords ? 1 : 0;
                 if (baseCoords) points.push({ label: 'Base (Loja)', coords: baseCoords, status: 'completed' });
                 stops.forEach((s, idx) => {
                     points.push({
@@ -338,6 +359,11 @@ export default function RouteMap({
                     // O trecho é "concluído" (verde) quando o destino já foi atendido.
                     const status: RouteLeg['status'] = to.status;
 
+                    // A parada de onde esse trecho sai (pra persistir a preferência de balsa
+                    // nela) - só não existe na 1ª perna (Base → 1ª parada, sem parada anterior).
+                    const fromStopIdx = i - baseOffset;
+                    const fromStop = fromStopIdx >= 0 && fromStopIdx < stops.length ? stops[fromStopIdx].stop : undefined;
+
                     legs.push({
                         id: `leg-${routeKey}-${i}`,
                         fromLabel: from.label,
@@ -347,6 +373,8 @@ export default function RouteMap({
                         durationMin: legData.durationMin,
                         status,
                         hasFerry: legData.hasFerry,
+                        fromServiceOrder: fromStop?.serviceOrder,
+                        fromStopAvoidFerry: !!fromStop?.avoidFerryToNext,
                         noFerry: legData.noFerry,
                     });
                 }
@@ -354,6 +382,9 @@ export default function RouteMap({
 
             if (isMounted) {
                 setRouteLegs(legs);
+                // Semeia o toggle local a partir do que já está salvo na parada -
+                // assim uma preferência salva volta marcada ao reabrir/recarregar o mapa.
+                setAvoidFerryLegs(new Set(legs.filter(l => l.hasFerry && l.fromStopAvoidFerry).map(l => l.id)));
             }
         };
 
@@ -469,11 +500,16 @@ export default function RouteMap({
                                     )}
                                     <button
                                         type="button"
-                                        onClick={() => toggleAvoidFerry(leg.id)}
+                                        onClick={() => handleToggleFerry(leg)}
                                         className="mt-1.5 w-full text-[11px] font-semibold px-2 py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-700 transition-colors"
                                     >
                                         {usingNoFerry ? "Usar balsa novamente" : "Calcular sem usar a balsa"}
                                     </button>
+                                    {leg.fromServiceOrder && onFerryPreferenceChange ? (
+                                        <p className="text-[9px] text-slate-400 mt-1">Essa escolha é salva com a rota.</p>
+                                    ) : (
+                                        <p className="text-[9px] text-slate-400 mt-1">Essa escolha vale só pra essa visualização (não é salva).</p>
+                                    )}
                                 </>
                             ) : (
                                 <p className="text-[10px] text-slate-500 mt-0.5">Nenhuma alternativa só por rodovia foi encontrada pra esse trecho.</p>
