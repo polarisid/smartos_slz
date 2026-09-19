@@ -109,25 +109,16 @@ async function fetchWithTimeout(url: string, timeoutMs = 8000): Promise<Response
     }
 }
 
-// Busca a rota 100% rodoviária (sem balsa) pra servir de alternativa quando o
-// trecho padrão inclui travessia - `exclude=ferry` é suportado pelo profile
-// "car" padrão do OSRM (inclusive no servidor público de demonstração).
-async function fetchNoFerryAlternative(baseUrl: string, coordsStr: string): Promise<FerryAlternative | undefined> {
-    try {
-        const res = await fetchWithTimeout(`${baseUrl}${coordsStr}?overview=full&geometries=geojson&exclude=ferry`);
-        if (res.ok) {
-            const data = await res.json();
-            const r = data.routes?.[0];
-            if (r?.geometry) {
-                return {
-                    coords: r.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]),
-                    distanceKm: Math.round((r.distance / 1000) * 10) / 10,
-                    durationMin: Math.round(r.duration / 60),
-                };
-            }
-        }
-    } catch (e) {}
-    return undefined;
+function routeUsesFerry(r: any): boolean {
+    return !!r?.legs?.some((leg: any) => leg.steps?.some((s: any) => s.mode === 'ferry'));
+}
+
+function toFerryAlternative(r: any): FerryAlternative {
+    return {
+        coords: r.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]),
+        distanceKm: Math.round((r.distance / 1000) * 10) / 10,
+        durationMin: Math.round(r.duration / 60),
+    };
 }
 
 async function fetchLegRoadPath(
@@ -147,22 +138,26 @@ async function fetchLegRoadPath(
 
     for (const baseUrl of endpoints) {
         try {
-            // steps=true só pra conseguir o "mode" de cada trecho (detectar balsa) -
-            // não usamos as instruções turn-by-turn em si.
-            const res = await fetchWithTimeout(`${baseUrl}${coordsStr}?overview=full&geometries=geojson&steps=true`);
+            // steps=true só pra conseguir o "mode" de cada trecho (detectar balsa).
+            // alternatives=true pra ter uma rota alternativa pronta pra oferecer sem
+            // balsa - o parâmetro `exclude` NÃO funciona nos servidores públicos
+            // (retornam "Exclude flag combination is not supported"), então a
+            // alternativa vem de uma rota diferente sugerida pelo próprio OSRM,
+            // não de forçar a exclusão da via de balsa.
+            const res = await fetchWithTimeout(`${baseUrl}${coordsStr}?overview=full&geometries=geojson&steps=true&alternatives=true`);
             if (res.ok) {
                 const data = await res.json();
                 if (data.routes && data.routes[0] && data.routes[0].geometry) {
                     const r = data.routes[0];
                     const roadCoords: [number, number][] = r.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]]);
-                    const hasFerry = !!r.legs?.some((leg: any) => leg.steps?.some((s: any) => s.mode === 'ferry'));
-                    const noFerry = hasFerry ? await fetchNoFerryAlternative(baseUrl, coordsStr) : undefined;
+                    const hasFerry = routeUsesFerry(r);
+                    const noFerryRoute = hasFerry ? (data.routes as any[]).slice(1).find(alt => alt.geometry && !routeUsesFerry(alt)) : undefined;
                     return {
                         coords: roadCoords.length > 0 ? roadCoords : [p1, p2],
                         distanceKm: Math.round((r.distance / 1000) * 10) / 10,
                         durationMin: Math.round(r.duration / 60),
                         hasFerry,
-                        noFerry,
+                        noFerry: noFerryRoute ? toFerryAlternative(noFerryRoute) : undefined,
                     };
                 }
             }
@@ -467,16 +462,22 @@ export default function RouteMap({
                             <p className="text-[11px] font-bold text-cyan-700 flex items-center gap-1">
                                 ⛴️ Este trecho inclui travessia de balsa
                             </p>
-                            {!usingNoFerry && leg.noFerry && (
-                                <p className="text-[10px] text-slate-500 mt-0.5">Só por rodovia: {leg.noFerry.distanceKm} km ({leg.noFerry.durationMin} min)</p>
+                            {leg.noFerry ? (
+                                <>
+                                    {!usingNoFerry && (
+                                        <p className="text-[10px] text-slate-500 mt-0.5">Só por rodovia: {leg.noFerry.distanceKm} km ({leg.noFerry.durationMin} min)</p>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleAvoidFerry(leg.id)}
+                                        className="mt-1.5 w-full text-[11px] font-semibold px-2 py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-700 transition-colors"
+                                    >
+                                        {usingNoFerry ? "Usar balsa novamente" : "Calcular sem usar a balsa"}
+                                    </button>
+                                </>
+                            ) : (
+                                <p className="text-[10px] text-slate-500 mt-0.5">Nenhuma alternativa só por rodovia foi encontrada pra esse trecho.</p>
                             )}
-                            <button
-                                type="button"
-                                onClick={() => toggleAvoidFerry(leg.id)}
-                                className="mt-1.5 w-full text-[11px] font-semibold px-2 py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-700 transition-colors"
-                            >
-                                {usingNoFerry ? "Usar balsa novamente" : "Calcular sem usar a balsa"}
-                            </button>
                         </div>
                     );
 
